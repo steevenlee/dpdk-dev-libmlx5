@@ -76,9 +76,46 @@ struct mlx5_alloc_ucontext_resp {
 	__u16				reserved;
 	__u32				max_desc_sz_sq_dc;
 	__u32				atomic_sizes_dc;
-	__u32				cqe_version;
+	__u32				reserved1;
 	__u32				flags;
 	__u32				reserved2[5];
+};
+
+enum mlx5_exp_alloc_context_resp_mask {
+	MLX5_EXP_ALLOC_CTX_RESP_MASK_CQE_COMP_MAX_NUM		= 1 << 0,
+	MLX5_EXP_ALLOC_CTX_RESP_MASK_CQE_VERSION		= 1 << 1,
+};
+
+struct mlx5_exp_alloc_ucontext_data_resp {
+	__u32   comp_mask; /* use mlx5_exp_alloc_context_resp_mask */
+	__u16   cqe_comp_max_num;
+	__u8    cqe_version;
+	__u8    reserved;
+};
+
+struct mlx5_exp_alloc_ucontext_resp {
+	struct ibv_get_context_resp			ibv_resp;
+	__u32						qp_tab_size;
+	__u32						bf_reg_size;
+	__u32						tot_uuars;
+	__u32						cache_line_size;
+	__u16						max_sq_desc_sz;
+	__u16						max_rq_desc_sz;
+	__u32						max_send_wqebb;
+	__u32						max_recv_wr;
+	__u32						max_srq_recv_wr;
+	__u16						num_ports;
+	__u16						reserved;
+	__u32						max_desc_sz_sq_dc;
+	__u32						atomic_sizes_dc;
+	__u32						reseved1;
+	__u32						flags;
+	__u32						reserved2[5];
+	/* Some more reserved fields for future growth of
+	 * mlx5_alloc_ucontext_resp */
+	__u64						prefix_reserved[8];
+
+	struct mlx5_exp_alloc_ucontext_data_resp	exp_data;
 };
 
 struct mlx5_alloc_pd_resp {
@@ -99,11 +136,37 @@ struct mlx5_create_cq_resp {
 	__u32				reserved;
 };
 
+enum mlx5_exp_creaet_cq_mask {
+		MLX5_EXP_CREATE_CQ_MASK_CQE_COMP_EN		= 1 << 0,
+		MLX5_EXP_CREATE_CQ_MASK_CQE_COMP_RECV_TYPE	= 1 << 1,
+		MLX5_EXP_CREATE_CQ_MASK_RESERVED		= 1 << 2,
+};
+
+enum mlx5_exp_cqe_comp_recv_type {
+	MLX5_CQE_FORMAT_HASH,
+	MLX5_CQE_FORMAT_CSUM,
+};
+
+struct mlx5_exp_create_cq_data {
+	__u32   comp_mask; /* use mlx5_exp_creaet_cq_mask */
+	__u8    cqe_comp_en;
+	__u8    cqe_comp_recv_type; /* use mlx5_exp_cqe_comp_recv_type */
+	__u16   reserved;
+};
+
 struct mlx5_exp_create_cq {
 	struct ibv_exp_create_cq	ibv_cmd;
 	__u64				buf_addr;
 	__u64				db_addr;
 	__u32				cqe_size;
+	__u32				reserved;
+	/* Some more reserved fields for future growth of mlx5_create_cq */
+	__u64   prefix_reserved[8];
+
+	/* sizeof prefix aligned with mlx5_create_cq */
+	__u64   size_of_prefix;
+
+	struct mlx5_exp_create_cq_data exp_data;
 };
 
 struct mlx5_create_srq {

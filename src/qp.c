@@ -2074,11 +2074,13 @@ static inline int send_pending(struct ibv_qp *ibqp, uint64_t addr,
 			       const int num_sge, struct ibv_sge *sg_list)
 
 {
-	struct mlx5_qp *qp = to_mqp(ibqp);
+	struct mlx5_wqe_inline_seg *uninitialized_var(inl_seg);
 	struct mlx5_wqe_data_seg *uninitialized_var(dseg);
-	uint8_t fm_ce_se;
+	uint8_t *uninitialized_var(inl_data);
 	uint32_t *uninitialized_var(start);
+	struct mlx5_qp *qp = to_mqp(ibqp);
 	int uninitialized_var(size);
+	uint8_t fm_ce_se;
 	int i;
 
 	if (thread_safe)
@@ -2096,10 +2098,25 @@ static inline int send_pending(struct ibv_qp *ibqp, uint64_t addr,
 			msg_size = length;
 			n_sg = 1;
 		}
-		if ((qp->mpw.state == MLX5_MPW_STATE_OPENED) &&
+		if (use_inl &&
+		    (qp->mpw.state == MLX5_MPW_STATE_OPENED_INL) &&
 		    (qp->mpw.len == msg_size) &&
-		    (qp->mpw.flags & ~IBV_EXP_QP_BURST_SIGNALED) == (flags & ~IBV_EXP_QP_BURST_SIGNALED) &&
-		    (qp->mpw.num_sge + n_sg) <= MLX5_MAX_MPW_SGE) {
+		    ((qp->mpw.flags & ~IBV_EXP_QP_BURST_SIGNALED) ==
+		     (flags & ~IBV_EXP_QP_BURST_SIGNALED)) &&
+		    ((qp->mpw.total_len + msg_size) <= qp->data_seg.max_inline_data)) {
+			/* Add current message to opened multi-packet WQE */
+			inl_seg = (struct mlx5_wqe_inline_seg *)(qp->mpw.ctrl_update + 7);
+			inl_data = qp->mpw.inl_data + qp->mpw.len;
+			if (unlikely((void *)inl_data >= qp->gen_data.sqend))
+				inl_data = (uint8_t *)mlx5_get_send_wqe(qp, 0) +
+					   (inl_data - (uint8_t *)qp->gen_data.sqend);
+			qp->mpw.total_len += msg_size;
+		} else if (!use_inl &&
+			   (qp->mpw.state == MLX5_MPW_STATE_OPENED) &&
+			   (qp->mpw.len == msg_size) &&
+			   ((qp->mpw.flags & ~IBV_EXP_QP_BURST_SIGNALED) ==
+			    (flags & ~IBV_EXP_QP_BURST_SIGNALED)) &&
+			   (qp->mpw.num_sge + n_sg) <= MLX5_MAX_MPW_SGE) {
 			/* Add current message to opened multi-packet WQE */
 			dseg = qp->mpw.last_dseg + 1;
 			if (unlikely(dseg == qp->gen_data.sqend))
@@ -2113,6 +2130,7 @@ static inline int send_pending(struct ibv_qp *ibqp, uint64_t addr,
 			qp->mpw.num_sge = n_sg;
 			qp->mpw.flags = flags;
 			qp->mpw.scur_post = qp->gen_data.scur_post;
+			qp->mpw.total_len = msg_size;
 		}
 	} else {
 		/* Close multi-packet WQE */
@@ -2126,12 +2144,15 @@ static inline int send_pending(struct ibv_qp *ibqp, uint64_t addr,
 	}
 
 	/* Start new WQE if there is no open multi-packet WQE */
-	if (qp->mpw.state != MLX5_MPW_STATE_OPENED) {
+	if ((use_inl && (qp->mpw.state != MLX5_MPW_STATE_OPENED_INL)) ||
+	    (!use_inl && (qp->mpw.state != MLX5_MPW_STATE_OPENED))) {
 		start = mlx5_get_send_wqe(qp, qp->gen_data.scur_post & (qp->sq.wqe_cnt - 1));
 
 		if (use_raw_eth) {
-			struct mlx5_wqe_eth_seg *eseg = (struct mlx5_wqe_eth_seg *)(((char *)start) + sizeof(struct mlx5_wqe_ctrl_seg));
+			struct mlx5_wqe_eth_seg *eseg;
 
+			eseg = (struct mlx5_wqe_eth_seg *)(((char *)start) +
+							   sizeof(struct mlx5_wqe_ctrl_seg));
 			/* reset rsvd0, cs_flags, rsvd1, mss and rsvd2 fields */
 			*((uint64_t *)eseg) = 0;
 			eseg->rsvd2 = 0;
@@ -2143,7 +2164,14 @@ static inline int send_pending(struct ibv_qp *ibqp, uint64_t addr,
 				eseg->inline_hdr_sz = 0;
 				size = (sizeof(struct mlx5_wqe_ctrl_seg) +
 					offsetof(struct mlx5_wqe_eth_seg, inline_hdr)) / 16;
-				dseg = (struct mlx5_wqe_data_seg *)(start + (size * 4));
+				if (use_inl) {
+					inl_seg = (struct mlx5_wqe_inline_seg *)(start +
+										 (size * 4));
+					inl_data = (uint8_t *)(inl_seg + 1);
+				} else {
+					dseg = (struct mlx5_wqe_data_seg *)(start +
+									    (size * 4));
+				}
 			} else {
 				eseg->inline_hdr_sz = htons(MLX5_ETH_INLINE_HEADER_SIZE);
 
@@ -2167,9 +2195,28 @@ static inline int send_pending(struct ibv_qp *ibqp, uint64_t addr,
 	}
 
 	if (use_inl) {
-		struct ibv_sge sg_list = {addr, length, 0};
+		if (use_mpw) {
+			if (unlikely((inl_data + qp->mpw.len) >
+				     (uint8_t *)qp->gen_data.sqend)) {
+				int size2end = ((uint8_t *)qp->gen_data.sqend - inl_data);
 
-		set_data_inl_seg(qp, 1, &sg_list, dseg, &size, 0, 0);
+				memcpy(inl_data, (void *)(uintptr_t)addr, size2end);
+				memcpy(mlx5_get_send_wqe(qp, 0),
+				       (void *)(uintptr_t)(addr + size2end),
+				       qp->mpw.len - size2end);
+
+			} else {
+				memcpy(inl_data, (void *)(uintptr_t)addr, qp->mpw.len);
+			}
+			inl_seg->byte_count = htonl(qp->mpw.total_len | MLX5_INLINE_SEG);
+			size = (sizeof(struct mlx5_wqe_ctrl_seg) +
+				offsetof(struct mlx5_wqe_eth_seg, inline_hdr)) / 16;
+			size += align(qp->mpw.total_len + sizeof(inl_seg->byte_count), 16) / 16;
+		} else {
+			struct ibv_sge sg_list = {addr, length, 0};
+
+			set_data_inl_seg(qp, 1, &sg_list, dseg, &size, 0, 0);
+		}
 	} else {
 		size += sizeof(struct mlx5_wqe_data_seg) / 16;
 		dseg->byte_count = htonl(length);
@@ -2192,11 +2239,18 @@ static inline int send_pending(struct ibv_qp *ibqp, uint64_t addr,
 			}
 		}
 	}
-	if (use_mpw)
-		qp->mpw.last_dseg = dseg;
+	if (use_mpw) {
+		if (use_inl)
+			qp->mpw.inl_data = inl_data;
+		else
+			qp->mpw.last_dseg = dseg;
+	}
 
-	if (qp->mpw.state != MLX5_MPW_STATE_OPENED) {
-		fm_ce_se = qp->ctrl_seg.fm_ce_se_acc[flags & (IBV_EXP_QP_BURST_SOLICITED | IBV_EXP_QP_BURST_SIGNALED | IBV_EXP_QP_BURST_FENCE)];
+	if ((use_inl && (qp->mpw.state != MLX5_MPW_STATE_OPENED_INL)) ||
+	    (!use_inl && (qp->mpw.state != MLX5_MPW_STATE_OPENED))) {
+		fm_ce_se = qp->ctrl_seg.fm_ce_se_acc[flags & (IBV_EXP_QP_BURST_SOLICITED |
+							      IBV_EXP_QP_BURST_SIGNALED |
+							      IBV_EXP_QP_BURST_FENCE)];
 		if (unlikely(qp->gen_data.fm_cache)) {
 			if (unlikely(flags & IBV_SEND_FENCE))
 				fm_ce_se |= MLX5_FENCE_MODE_SMALL_AND_FENCE;
@@ -2207,16 +2261,23 @@ static inline int send_pending(struct ibv_qp *ibqp, uint64_t addr,
 
 		if (use_mpw) {
 			/* We get here in MLX5_MPW_STATE_OPENING state only */
-			*start++ = htonl((MLX5_OPC_MOD_MPW << 24) | ((qp->gen_data.scur_post & 0xFFFF) << 8) | MLX5_OPCODE_LSO_MPW);
+			*start++ = htonl((MLX5_OPC_MOD_MPW << 24) |
+					 ((qp->gen_data.scur_post & 0xFFFF) << 8) |
+					 MLX5_OPCODE_LSO_MPW);
 			qp->mpw.ctrl_update = start;
-			if ((flags & IBV_EXP_QP_BURST_SIGNALED) || (qp->mpw.num_sge >= MLX5_MAX_MPW_SGE)) {
+			if ((flags & IBV_EXP_QP_BURST_SIGNALED) ||
+			    (qp->mpw.num_sge >= MLX5_MAX_MPW_SGE)) {
 				qp->mpw.state = MLX5_MPW_STATE_CLOSED;
 			} else {
-				qp->mpw.state = MLX5_MPW_STATE_OPENED;
+				if (use_inl)
+					qp->mpw.state = MLX5_MPW_STATE_OPENED_INL;
+				else
+					qp->mpw.state = MLX5_MPW_STATE_OPENED;
 				qp->mpw.size = size;
 			}
 		} else {
-			*start++ = htonl((qp->gen_data.scur_post & 0xFFFF) << 8 | MLX5_OPCODE_SEND);
+			*start++ = htonl((qp->gen_data.scur_post & 0xFFFF) << 8 |
+					 MLX5_OPCODE_SEND);
 		}
 		*start++ = htonl(qp->ctrl_seg.qp_num << 8 | (size & 0x3F));
 		*start++ = htonl(fm_ce_se);
@@ -2225,7 +2286,10 @@ static inline int send_pending(struct ibv_qp *ibqp, uint64_t addr,
 		qp->gen_data.wqe_head[qp->gen_data.scur_post & (qp->sq.wqe_cnt - 1)] = ++(qp->sq.head);
 		qp->gen_data.scur_post += DIV_ROUND_UP(size * 16, MLX5_SEND_WQE_BB);
 	} else {
-		qp->mpw.size += size;
+		if (use_inl)
+			qp->mpw.size = size;
+		else
+			qp->mpw.size += size;
 		*qp->mpw.ctrl_update = htonl(qp->ctrl_seg.qp_num << 8 | ((qp->mpw.size) & 0x3F));
 		qp->gen_data.scur_post = qp->mpw.scur_post + DIV_ROUND_UP(qp->mpw.size * 16, MLX5_SEND_WQE_BB);
 		if (flags & IBV_EXP_QP_BURST_SIGNALED) {
@@ -2315,23 +2379,40 @@ static int mlx5_send_pending_inl_safe(struct ibv_qp *qp, void *addr,
 			    1,   1,     0,      0,       0,       NULL);
 }
 
-#define MLX5_SEND_PENDING_INL_UNSAFE_NAME(eth) mlx5_send_pending_inl_unsafe_##eth
-#define MLX5_SEND_PENDING_INL_UNSAFE(eth)							\
-	static int MLX5_SEND_PENDING_INL_UNSAFE_NAME(eth)(					\
+static int mlx5_send_pending_inl_mpw_safe(struct ibv_qp *qp, void *addr,
+					  uint32_t length, uint32_t flags) __MLX5_ALGN_F__;
+static int mlx5_send_pending_inl_mpw_safe(struct ibv_qp *qp, void *addr,
+					  uint32_t length, uint32_t flags)
+{
+	struct mlx5_qp *mqp = to_mqp(qp);
+	int raw_eth = mqp->gen_data_warm.qp_type == IBV_QPT_RAW_PACKET &&
+		      mqp->link_layer == IBV_LINK_LAYER_ETHERNET;
+
+			/*  qp, addr,            length, lkey, flags, raw_eth,	*/
+	return send_pending(qp, (uintptr_t)addr, length, 0,    flags, raw_eth,
+			/*  inl, safe,  use_sg, use_mpw, num_sge, sg_list	*/
+			    1,   1,     0,      1,       0,       NULL);
+}
+
+#define MLX5_SEND_PENDING_INL_UNSAFE_NAME(eth, mpw) mlx5_send_pending_inl_unsafe_##eth##mpw
+#define MLX5_SEND_PENDING_INL_UNSAFE(eth, mpw)							\
+	static int MLX5_SEND_PENDING_INL_UNSAFE_NAME(eth, mpw)(					\
 					struct ibv_qp *qp, void *addr,				\
 					uint32_t length, uint32_t flags) __MLX5_ALGN_F__;	\
-	static int MLX5_SEND_PENDING_INL_UNSAFE_NAME(eth)(					\
+	static int MLX5_SEND_PENDING_INL_UNSAFE_NAME(eth, mpw)(					\
 					struct ibv_qp *qp, void *addr,				\
 					uint32_t length, uint32_t flags)			\
 	{											\
 		/*                  qp, addr,            length, lkey, flags, eth, inl, */	\
 		return send_pending(qp, (uintptr_t)addr, length, 0,    flags, eth, 1,		\
 				/*  safe,  use_sg, use_mpw, num_sge, sg_list */			\
-				    0,     0,      0,       0,       NULL);			\
+				    0,     0,      mpw,     0,       NULL);			\
 	}
-/*			    eth */
-MLX5_SEND_PENDING_INL_UNSAFE(0);
-MLX5_SEND_PENDING_INL_UNSAFE(1);
+/*			    eth mpw */
+MLX5_SEND_PENDING_INL_UNSAFE(0, 0);
+MLX5_SEND_PENDING_INL_UNSAFE(0, 1);
+MLX5_SEND_PENDING_INL_UNSAFE(1, 0);
+MLX5_SEND_PENDING_INL_UNSAFE(1, 1);
 
 /* burst family - send_pending_sg_list */
 static int mlx5_send_pending_sg_list_safe(
@@ -2635,7 +2716,7 @@ struct ibv_exp_qp_burst_family mlx5_qp_burst_family_safe = {
 struct ibv_exp_qp_burst_family mlx5_qp_burst_family_mpw_safe = {
 		.send_burst = mlx5_send_burst_mpw_safe,
 		.send_pending = mlx5_send_pending_mpw_safe,
-		.send_pending_inline = mlx5_send_pending_inl_safe,
+		.send_pending_inline = mlx5_send_pending_inl_mpw_safe,
 		.send_pending_sg_list = mlx5_send_pending_sg_list_mpw_safe,
 		.send_flush = mlx5_send_flush_safe,
 		.recv_burst = mlx5_recv_burst_safe
@@ -2662,7 +2743,7 @@ struct ibv_exp_qp_burst_family mlx5_qp_burst_family_mpw_safe = {
 	[MLX5_QP_BURST_UNSAFE_TBL_IDX(db_method, eth, _1sge, mpw)] = {				\
 		.send_burst		= MLX5_SEND_BURST_UNSAFE_NAME(db_method, eth, mpw),	\
 		.send_pending		= MLX5_SEND_PENDING_UNSAFE_NAME(eth, mpw),		\
-		.send_pending_inline	= MLX5_SEND_PENDING_INL_UNSAFE_NAME(eth),		\
+		.send_pending_inline	= MLX5_SEND_PENDING_INL_UNSAFE_NAME(eth, mpw),		\
 		.send_pending_sg_list	= MLX5_SEND_PENDING_SG_LIST_UNSAFE_NAME(eth, mpw),	\
 		.send_flush		= MLX5_SEND_FLUSH_UNSAFE_NAME(db_method),		\
 		.recv_burst		= MLX5_RECV_BURST_UNSAFE_NAME(_1sge),			\
