@@ -2104,7 +2104,7 @@ static inline int send_pending(struct ibv_qp *ibqp, uint64_t addr,
 		    ((qp->mpw.flags & ~IBV_EXP_QP_BURST_SIGNALED) ==
 		     (flags & ~IBV_EXP_QP_BURST_SIGNALED)) &&
 		    ((qp->mpw.total_len + msg_size) <= qp->data_seg.max_inline_data)) {
-			/* Add current message to opened multi-packet WQE */
+			/* Add current message to opened inline multi-packet WQE */
 			inl_seg = (struct mlx5_wqe_inline_seg *)(qp->mpw.ctrl_update + 7);
 			inl_data = qp->mpw.inl_data + qp->mpw.len;
 			if (unlikely((void *)inl_data >= qp->gen_data.sqend))
@@ -2123,14 +2123,28 @@ static inline int send_pending(struct ibv_qp *ibqp, uint64_t addr,
 				dseg = mlx5_get_send_wqe(qp, 0);
 			size = 0;
 			qp->mpw.num_sge += n_sg;
-		} else {
-			/* Open new multi-packet WQE */
+		} else if (likely(use_inl || (msg_size <= MLX5_MAX_MPW_SIZE))) {
+			/* Open new multi-packet WQE
+			 *
+			 * In case of inline the user must make sure that
+			 * message size is smaller than max_inline which
+			 * means that it is also smaller than MLX5_MAX_MPW_SIZE
+			 * This guarantees that we can open multi-packet WQE.
+			 * In case of non-inline we must check that msg_size is
+			 * smaller than MLX5_MAX_MPW_SIZE.
+			 */
+
 			qp->mpw.state = MLX5_MPW_STATE_OPENING;
 			qp->mpw.len = msg_size;
 			qp->mpw.num_sge = n_sg;
 			qp->mpw.flags = flags;
 			qp->mpw.scur_post = qp->gen_data.scur_post;
 			qp->mpw.total_len = msg_size;
+		} else {
+			/* We can't open new multi-packet WQE
+			 * since msg_size > MLX5_MAX_MPW_SIZE
+			 */
+			qp->mpw.state = MLX5_MPW_STATE_CLOSED;
 		}
 	} else {
 		/* Close multi-packet WQE */
@@ -2159,7 +2173,7 @@ static inline int send_pending(struct ibv_qp *ibqp, uint64_t addr,
 
 			if (flags & IBV_EXP_QP_BURST_IP_CSUM)
 				eseg->cs_flags = MLX5_ETH_WQE_L3_CSUM | MLX5_ETH_WQE_L4_CSUM;
-			if (use_mpw) {
+			if (use_mpw && (qp->mpw.state == MLX5_MPW_STATE_OPENING)) {
 				eseg->mss = htons(qp->mpw.len);
 				eseg->inline_hdr_sz = 0;
 				size = (sizeof(struct mlx5_wqe_ctrl_seg) +
@@ -2248,6 +2262,7 @@ static inline int send_pending(struct ibv_qp *ibqp, uint64_t addr,
 
 	if ((use_inl && (qp->mpw.state != MLX5_MPW_STATE_OPENED_INL)) ||
 	    (!use_inl && (qp->mpw.state != MLX5_MPW_STATE_OPENED))) {
+		/* Fill ctrl-segment of a new WQE */
 		fm_ce_se = qp->ctrl_seg.fm_ce_se_acc[flags & (IBV_EXP_QP_BURST_SOLICITED |
 							      IBV_EXP_QP_BURST_SIGNALED |
 							      IBV_EXP_QP_BURST_FENCE)];
@@ -2259,8 +2274,7 @@ static inline int send_pending(struct ibv_qp *ibqp, uint64_t addr,
 			qp->gen_data.fm_cache = 0;
 		}
 
-		if (use_mpw) {
-			/* We get here in MLX5_MPW_STATE_OPENING state only */
+		if (likely(use_mpw && (qp->mpw.state == MLX5_MPW_STATE_OPENING))) {
 			*start++ = htonl((MLX5_OPC_MOD_MPW << 24) |
 					 ((qp->gen_data.scur_post & 0xFFFF) << 8) |
 					 MLX5_OPCODE_LSO_MPW);
@@ -2284,8 +2298,11 @@ static inline int send_pending(struct ibv_qp *ibqp, uint64_t addr,
 		*start = 0;
 
 		qp->gen_data.wqe_head[qp->gen_data.scur_post & (qp->sq.wqe_cnt - 1)] = ++(qp->sq.head);
+		/* Update last_post to point on the position of the new WQE */
+		qp->gen_data.last_post = qp->gen_data.scur_post;
 		qp->gen_data.scur_post += DIV_ROUND_UP(size * 16, MLX5_SEND_WQE_BB);
 	} else {
+		/* Update the multi-packt WQE ctrl-segment */
 		if (use_inl)
 			qp->mpw.size = size;
 		else

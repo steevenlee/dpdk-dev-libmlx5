@@ -63,7 +63,7 @@ static void __mlx5_query_device(uint64_t raw_fw_ver,
 	sub_minor = raw_fw_ver & 0xffff;
 
 	snprintf(attr->fw_ver, sizeof attr->fw_ver,
-		 "%d.%d.%04d", major, minor, sub_minor);
+		 "%d.%d.%03d", major, minor, sub_minor);
 }
 
 int mlx5_query_device(struct ibv_context *context,

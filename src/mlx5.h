@@ -595,7 +595,8 @@ enum mpw_states {
 	MLX5_MPW_STATE_OPENING,
 };
 enum {
-	MLX5_MAX_MPW_SGE = 5
+	MLX5_MAX_MPW_SGE = 5,
+	MLX5_MAX_MPW_SIZE = 0x3FFF
 };
 struct mpw_data {
 	uint8_t		state; /* use mpw_states */
