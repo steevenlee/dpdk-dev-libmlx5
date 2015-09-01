@@ -63,7 +63,7 @@ static void __mlx5_query_device(uint64_t raw_fw_ver,
 	sub_minor = raw_fw_ver & 0xffff;
 
 	snprintf(attr->fw_ver, sizeof attr->fw_ver,
-		 "%d.%d.%03d", major, minor, sub_minor);
+		 "%d.%d.%04d", major, minor, sub_minor);
 }
 
 int mlx5_query_device(struct ibv_context *context,
@@ -1661,9 +1661,17 @@ static struct ibv_qp *create_qp(struct ibv_context *context,
 		struct mlx5_res_domain *res_domain = to_mres_domain(attrx->res_domain);
 
 		drvx->exp.comp_mask |= MLX5_EXP_CREATE_QP_MASK_WC_UAR_IDX;
-		drvx->exp.wc_uar_index = res_domain->send_db->wc_uar->uar_idx;
+		if (res_domain->send_db) {
+			drvx->exp.wc_uar_index = res_domain->send_db->wc_uar->uar_idx;
+			qp->gen_data.bf = &res_domain->send_db->bf;
+		} else {
+			/* If we didn't allocate dedicated BF for this resource
+			 * domain we'll ask the kernel to provide UUAR that uses
+			 * DB only (no BF)
+			 */
+			drvx->exp.wc_uar_index = MLX5_EXP_CREATE_QP_DB_ONLY_UUAR;
+		}
 		thread_safe = (res_domain->attr.thread_model == IBV_EXP_THREAD_SAFE);
-		qp->gen_data.bf = &res_domain->send_db->bf;
 	}
 	if (mlx5_spinlock_init(&qp->sq.lock, thread_safe) ||
 	    mlx5_spinlock_init(&qp->rq.lock, thread_safe))
@@ -1731,7 +1739,8 @@ static struct ibv_qp *create_qp(struct ibv_context *context,
 	}
 
 	/* Update related BF mapping when uuar not provided by resource domain */
-	if (!(attrx->comp_mask & IBV_EXP_QP_INIT_ATTR_RES_DOMAIN)) {
+	if (!(attrx->comp_mask & IBV_EXP_QP_INIT_ATTR_RES_DOMAIN) ||
+	    !to_mres_domain(attrx->res_domain)->send_db) {
 		if (is_exp)
 			map_uuar(context, qp, respx.uuar_index);
 		else
@@ -2985,27 +2994,29 @@ struct ibv_exp_res_domain *mlx5_exp_create_res_domain(struct ibv_context *contex
 	res_domain->attr.comp_mask = IBV_EXP_RES_DOMAIN_RESERVED - 1;
 
 	res_domain->send_db = allocate_send_db(ctx);
-	if (!res_domain->send_db)
-		goto err;
-
-	switch (res_domain->attr.thread_model) {
-	case IBV_EXP_THREAD_SAFE:
-		res_domain->send_db->bf.db_method = MLX5_DB_METHOD_BF;
-		res_domain->send_db->bf.need_lock = 1;
-		break;
-	case IBV_EXP_THREAD_UNSAFE:
-		res_domain->send_db->bf.db_method = MLX5_DB_METHOD_DEDIC_BF;
-		res_domain->send_db->bf.need_lock = 0;
-		break;
-	case IBV_EXP_THREAD_SINGLE:
-		if (wc_auto_evict_size() == 64) {
-			res_domain->send_db->bf.db_method = MLX5_DB_METHOD_DEDIC_BF_1_THREAD;
-			res_domain->send_db->bf.need_lock = 0;
-		} else {
+	if (!res_domain->send_db) {
+		if (res_domain->attr.msg_model == IBV_EXP_MSG_FORCE_LOW_LATENCY)
+			goto err;
+	} else {
+		switch (res_domain->attr.thread_model) {
+		case IBV_EXP_THREAD_SAFE:
+			res_domain->send_db->bf.db_method = MLX5_DB_METHOD_BF;
+			res_domain->send_db->bf.need_lock = 1;
+			break;
+		case IBV_EXP_THREAD_UNSAFE:
 			res_domain->send_db->bf.db_method = MLX5_DB_METHOD_DEDIC_BF;
 			res_domain->send_db->bf.need_lock = 0;
+			break;
+		case IBV_EXP_THREAD_SINGLE:
+			if (wc_auto_evict_size() == 64) {
+				res_domain->send_db->bf.db_method = MLX5_DB_METHOD_DEDIC_BF_1_THREAD;
+				res_domain->send_db->bf.need_lock = 0;
+			} else {
+				res_domain->send_db->bf.db_method = MLX5_DB_METHOD_DEDIC_BF;
+				res_domain->send_db->bf.need_lock = 0;
+			}
+			break;
 		}
-		break;
 	}
 
 	return &res_domain->ibv_res_domain;
@@ -3082,7 +3093,7 @@ void *mlx5_exp_query_intf(struct ibv_context *context, struct ibv_exp_query_intf
 	case IBV_EXP_INTF_CQ:
 		cq = to_mcq(params->obj);
 		if (cq->pattern == MLX5_CQ_PATTERN) {
-			family = (void *)mlx5_get_poll_cq_family(cq, status);
+			family = (void *)mlx5_get_poll_cq_family(cq, params, status);
 		} else {
 			fprintf(stderr, PFX "Warning: non-valid CQ passed to query interface\n");
 			*status = IBV_EXP_INTF_STAT_INVAL_OBJ;

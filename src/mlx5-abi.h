@@ -213,6 +213,10 @@ enum mlx5_exp_create_qp_flags {
 	MLX5_EXP_CREATE_QP_MULTI_PACKET_WQE_REQ_FLAG = 1 << 0,
 };
 
+enum mlx5_exp_drv_create_qp_uar_idx {
+	MLX5_EXP_CREATE_QP_DB_ONLY_UUAR = -1
+};
+
 struct mlx5_exp_drv_create_qp_data {
 	__u32   comp_mask; /* use mlx5_exp_ib_create_qp_mask */
 	__u32   uidx;

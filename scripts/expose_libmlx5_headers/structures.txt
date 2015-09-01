@@ -39,3 +39,4 @@ mlx5_wq
 mlx5_bf
 mlx5_qp
 mlx5_ah
+mlx5_mini_cqe8

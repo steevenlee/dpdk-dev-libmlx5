@@ -1417,11 +1417,24 @@ static struct ibv_exp_cq_family mlx5_poll_cq_family_unsafe_v1_tbl[MLX5_POLL_CQ_N
 };
 
 struct ibv_exp_cq_family *mlx5_get_poll_cq_family(struct mlx5_cq *cq,
+						  struct ibv_exp_query_intf_params *params,
 						  enum ibv_exp_query_intf_status *status)
 {
 	struct mlx5_context *mctx = to_mctx(cq->ibv_cq.context);
 	enum mlx5_poll_cq_cqe_sizes cqe_size;
 
+	if (params->flags) {
+		fprintf(stderr, PFX "Global interface flags(0x%x) are not supported for CQ family\n", params->flags);
+		*status = IBV_EXP_INTF_STAT_FLAGS_NOT_SUPPORTED;
+
+		return NULL;
+	}
+	if (params->family_flags) {
+		fprintf(stderr, PFX "Family flags(0x%x) are not supported for CQ family\n", params->family_flags);
+		*status = IBV_EXP_INTF_STAT_FAMILY_FLAGS_NOT_SUPPORTED;
+
+		return NULL;
+	}
 	if (cq->model_flags & MLX5_CQ_MODEL_FLAG_THREAD_SAFE)
 		return &mlx5_poll_cq_family_safe;
 

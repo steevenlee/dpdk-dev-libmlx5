@@ -1026,6 +1026,7 @@ struct ibv_exp_wq_family *mlx5_get_wq_family(struct mlx5_rwq *rwq,
 					     struct ibv_exp_query_intf_params *params,
 					     enum ibv_exp_query_intf_status *status);
 struct ibv_exp_cq_family *mlx5_get_poll_cq_family(struct mlx5_cq *cq,
+						  struct ibv_exp_query_intf_params *params,
 						  enum ibv_exp_query_intf_status *status);
 static inline void *mlx5_find_uidx(struct mlx5_context *ctx, uint32_t uidx)
 {
