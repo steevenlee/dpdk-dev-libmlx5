@@ -129,10 +129,68 @@ int mlx5_query_device_ex(struct ibv_context *context,
 int mlx5_query_port(struct ibv_context *context, uint8_t port,
 		     struct ibv_port_attr *attr)
 {
+	struct mlx5_context *mctx = to_mctx(context);
 	struct ibv_query_port cmd;
+	int err;
 
-	read_init_vars(to_mctx(context));
-	return ibv_cmd_query_port(context, port, attr, &cmd, sizeof cmd);
+	read_init_vars(mctx);
+	err = ibv_cmd_query_port(context, port, attr, &cmd, sizeof cmd);
+
+	if (!err && port <= mctx->num_ports && port > 0) {
+		if (!mctx->port_query_cache[port - 1].valid) {
+			mctx->port_query_cache[port - 1].link_layer =
+				attr->link_layer;
+			mctx->port_query_cache[port - 1].caps =
+				attr->port_cap_flags;
+			mctx->port_query_cache[port - 1].valid = 1;
+		}
+	}
+
+	return err;
+}
+
+int mlx5_exp_query_port(struct ibv_context *context, uint8_t port_num,
+			struct ibv_exp_port_attr *port_attr)
+{
+	struct mlx5_context *mctx = to_mctx(context);
+
+	/* Check that only valid flags were given */
+	if (!(port_attr->comp_mask & IBV_EXP_QUERY_PORT_ATTR_MASK1) ||
+	    (port_attr->comp_mask & ~IBV_EXP_QUERY_PORT_ATTR_MASKS) ||
+	    (port_attr->mask1 & ~IBV_EXP_QUERY_PORT_MASK)) {
+		return EINVAL;
+	}
+
+	/* Optimize the link type query */
+	if (port_attr->comp_mask == IBV_EXP_QUERY_PORT_ATTR_MASK1) {
+		if (!(port_attr->mask1 & ~(IBV_EXP_QUERY_PORT_LINK_LAYER |
+					   IBV_EXP_QUERY_PORT_CAP_FLAGS))) {
+			if (port_num <= 0 || port_num > mctx->num_ports)
+				return EINVAL;
+			if (mctx->port_query_cache[port_num - 1].valid) {
+				if (port_attr->mask1 &
+				    IBV_EXP_QUERY_PORT_LINK_LAYER)
+					port_attr->link_layer =
+						mctx->
+						port_query_cache[port_num - 1].
+						link_layer;
+				if (port_attr->mask1 &
+				    IBV_EXP_QUERY_PORT_CAP_FLAGS)
+					port_attr->port_cap_flags =
+						mctx->
+						port_query_cache[port_num - 1].
+						caps;
+				return 0;
+			}
+		}
+		if (port_attr->mask1 & IBV_EXP_QUERY_PORT_STD_MASK) {
+			return mlx5_query_port(context, port_num,
+					       &port_attr->port_attr);
+		}
+	}
+
+	return EOPNOTSUPP;
+
 }
 
 struct ibv_pd *mlx5_alloc_pd(struct ibv_context *context)
@@ -2350,19 +2408,40 @@ int mlx5_modify_qp(struct ibv_qp *qp, struct ibv_qp_attr *attr,
 	return ret;
 }
 
-struct ibv_ah *mlx5_create_ah(struct ibv_pd *pd, struct ibv_ah_attr *attr)
+static inline int ipv6_addr_v4mapped(const struct in6_addr *a)
+{
+	return ((a->s6_addr32[0] | a->s6_addr32[1]) |
+		(a->s6_addr32[2] ^ htonl(0x0000ffff))) == 0UL ||
+		/* IPv4 encoded multicast addresses */
+	       (a->s6_addr32[0]  == htonl(0xff0e0000) &&
+		((a->s6_addr32[1] |
+		  (a->s6_addr32[2] ^ htonl(0x0000ffff))) == 0UL));
+}
+
+struct ibv_ah *mlx5_create_ah_common(struct ibv_pd *pd,
+				     struct ibv_ah_attr *attr,
+				     uint8_t link_layer,
+				     int gid_type)
 {
 	struct mlx5_ah *ah;
-	uint32_t tmp;
 	struct mlx5_context *ctx = to_mctx(pd->context);
 	struct mlx5_wqe_av *wqe;
+	uint32_t tmp;
+	uint8_t  grh;
 
 	if (unlikely(attr->port_num < 1 || attr->port_num > ctx->num_ports)) {
 		errno = EINVAL;
 		return NULL;
 	}
 
-	if (unlikely(!attr->dlid)) {
+	if (unlikely(!attr->dlid) &&
+	    (link_layer != IBV_LINK_LAYER_ETHERNET)) {
+		errno = EINVAL;
+		return NULL;
+	}
+
+	if (unlikely(!attr->is_global) &&
+	    (link_layer == IBV_LINK_LAYER_ETHERNET)) {
 		errno = EINVAL;
 		return NULL;
 	}
@@ -2375,22 +2454,99 @@ struct ibv_ah *mlx5_create_ah(struct ibv_pd *pd, struct ibv_ah_attr *attr)
 	wqe = &ah->av;
 
 	wqe->base.stat_rate_sl = (attr->static_rate << 4) | attr->sl;
-	wqe->base.fl_mlid = attr->src_path_bits & 0x7f;
-	wqe->base.rlid = htons(attr->dlid);
+
+	if (link_layer == IBV_LINK_LAYER_ETHERNET) {
+		if (gid_type == IBV_EXP_ROCE_V2_GID_TYPE)
+			wqe->base.rlid = htons(ctx->rroce_udp_sport_min);
+		grh = 0;
+	} else {
+		wqe->base.fl_mlid = attr->src_path_bits & 0x7f;
+		wqe->base.rlid = htons(attr->dlid);
+		grh = 1;
+	}
+
 	if (attr->is_global) {
 		wqe->base.dqp_dct = htonl(MLX5_EXTENDED_UD_AV);
 		wqe->grh_sec.tclass = attr->grh.traffic_class;
 		wqe->grh_sec.hop_limit = attr->grh.hop_limit;
-		tmp = htonl((1 << 30) |
+		tmp = htonl((grh << 30) |
 			    ((attr->grh.sgid_index & 0xff) << 20) |
 			    (attr->grh.flow_label & 0xfffff));
 		wqe->grh_sec.grh_gid_fl = tmp;
 		memcpy(wqe->grh_sec.rgid, attr->grh.dgid.raw, 16);
+		if ((link_layer == IBV_LINK_LAYER_ETHERNET) &&
+		    ipv6_addr_v4mapped((struct in6_addr *)attr->grh.dgid.raw))
+			memset(wqe->grh_sec.rgid + 4, 0, 12);
 	} else if (!ctx->compact_av) {
 		wqe->base.dqp_dct = htonl(MLX5_EXTENDED_UD_AV);
 	}
 
 	return &ah->ibv_ah;
+}
+
+struct ibv_ah *mlx5_create_ah(struct ibv_pd *pd, struct ibv_ah_attr *attr)
+{
+	struct ibv_exp_port_attr port_attr;
+
+	port_attr.comp_mask = IBV_EXP_QUERY_PORT_ATTR_MASK1;
+	port_attr.mask1 = IBV_EXP_QUERY_PORT_LINK_LAYER;
+
+	if (ibv_exp_query_port(pd->context, attr->port_num, &port_attr))
+		return NULL;
+
+	return mlx5_create_ah_common(pd, attr,  port_attr.link_layer,
+				     IBV_EXP_IB_ROCE_V1_GID_TYPE);
+}
+
+struct ibv_ah *mlx5_exp_create_ah(struct ibv_pd *pd,
+				  struct ibv_exp_ah_attr *attr_ex)
+{
+	struct mlx5_ah *mah;
+	struct ibv_ah *ah;
+	struct ibv_exp_port_attr port_attr;
+	struct ibv_exp_gid_attr gid_attr;
+
+	gid_attr.comp_mask = IBV_EXP_QUERY_GID_ATTR_TYPE;
+	if (ibv_exp_query_gid_attr(pd->context, attr_ex->port_num, attr_ex->grh.sgid_index,
+				   &gid_attr))
+		return NULL;
+
+	port_attr.comp_mask = IBV_EXP_QUERY_PORT_ATTR_MASK1;
+	port_attr.mask1 = IBV_EXP_QUERY_PORT_LINK_LAYER;
+
+	if (ibv_exp_query_port(pd->context, attr_ex->port_num, &port_attr))
+		return NULL;
+
+	ah = mlx5_create_ah_common(pd, (struct ibv_ah_attr *)attr_ex,
+				   port_attr.link_layer, gid_attr.type);
+
+	if (!ah)
+		return NULL;
+
+	mah = to_mah(ah);
+
+	/* ll_address.len == 0 means no ll address given */
+	if (attr_ex->comp_mask & IBV_EXP_AH_ATTR_LL &&
+	    0 != attr_ex->ll_address.len) {
+		if (LL_ADDRESS_ETH != attr_ex->ll_address.type ||
+		    port_attr.link_layer != IBV_LINK_LAYER_ETHERNET)
+			goto err;
+
+		/* link layer is ethernet */
+		if (6 != attr_ex->ll_address.len ||
+		    NULL == attr_ex->ll_address.address)
+			goto err;
+
+		memcpy(mah->av.grh_sec.rmac,
+		       attr_ex->ll_address.address,
+		       attr_ex->ll_address.len);
+	}
+
+	return ah;
+
+err:
+	free(ah);
+	return NULL;
 }
 
 int mlx5_destroy_ah(struct ibv_ah *ah)

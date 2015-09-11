@@ -597,6 +597,8 @@ static void set_experimental(struct ibv_context *ctx)
 	verbs_set_exp_ctx_op(verbs_exp_ctx, exp_destroy_res_domain, mlx5_exp_destroy_res_domain);
 	verbs_set_exp_ctx_op(verbs_exp_ctx, exp_query_intf, mlx5_exp_query_intf);
 	verbs_set_exp_ctx_op(verbs_exp_ctx, exp_release_intf, mlx5_exp_release_intf);
+	verbs_set_exp_ctx_op(verbs_exp_ctx, drv_exp_query_port, mlx5_exp_query_port);
+	verbs_set_exp_ctx_op(verbs_exp_ctx, drv_exp_ibv_create_ah, mlx5_exp_create_ah);
 	if (mctx->cqe_version == 1)
 		verbs_set_exp_ctx_op(verbs_exp_ctx, drv_exp_ibv_poll_cq,
 				     mlx5_poll_cq_ex_1);
@@ -707,6 +709,12 @@ static int mlx5_alloc_context(struct verbs_device *vdev,
 	if (resp.exp_data.comp_mask & MLX5_EXP_ALLOC_CTX_RESP_MASK_CQE_VERSION)
 		context->cqe_version = resp.exp_data.cqe_version;
 
+	if (resp.exp_data.comp_mask & MLX5_EXP_ALLOC_CTX_RESP_MASK_RROCE_UDP_SPORT_MIN)
+		context->rroce_udp_sport_min = resp.exp_data.rroce_udp_sport_min;
+
+	if (resp.exp_data.comp_mask & MLX5_EXP_ALLOC_CTX_RESP_MASK_RROCE_UDP_SPORT_MAX)
+		context->rroce_udp_sport_max = resp.exp_data.rroce_udp_sport_max;
+
 	if (context->cqe_version) {
 		if (context->cqe_version == 1) {
 			mlx5_ctx_ops.poll_cq = mlx5_poll_cq_1;
@@ -816,6 +824,9 @@ static int mlx5_alloc_context(struct verbs_device *vdev,
 	ctx->ops = mlx5_ctx_ops;
 	set_extended(verbs_ctx);
 	set_experimental(ctx);
+
+	for (i = 0; i < MLX5_MAX_PORTS_NUM; ++i)
+		context->port_query_cache[i].valid = 0;
 
 	return 0;
 

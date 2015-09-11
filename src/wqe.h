@@ -133,7 +133,8 @@ struct mlx5_base_av {
 };
 
 struct mlx5_grh_av {
-	uint8_t		reserved0[10];
+	uint8_t		reserved0[4];
+	uint8_t		rmac[6];
 	uint8_t		tclass;
 	uint8_t		hop_limit;
 	uint32_t	grh_gid_fl;
