@@ -465,6 +465,11 @@ struct mlx5_context {
 		uint8_t			shift;
 	} core_clock;
 	void			       *hca_core_clock;
+#ifdef MLX5_STUB
+	unsigned int pkts_len[512];
+	unsigned int pkts_n;
+	unsigned int pkts_tx_n;
+#endif /* MLX5_STUB */
 };
 /* MLX5_HW_EXPORT_END */
 

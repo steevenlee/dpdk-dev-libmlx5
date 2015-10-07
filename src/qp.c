@@ -1901,6 +1901,7 @@ static inline int send_pending(struct ibv_qp *ibqp, uint64_t addr,
 			       const int num_sge, struct ibv_sge *sg_list)
 
 {
+#ifndef MLX5_STUB
 	struct mlx5_wqe_inline_seg *uninitialized_var(inl_seg);
 	struct mlx5_wqe_data_seg *uninitialized_var(dseg);
 	uint8_t *uninitialized_var(inl_data);
@@ -2146,7 +2147,14 @@ static inline int send_pending(struct ibv_qp *ibqp, uint64_t addr,
 
 	if (thread_safe)
 		mlx5_unlock(&qp->sq.lock);
+#else /* MLX5_STUB */
+	struct mlx5_context *ctx;
 
+	ctx = to_mctx(ibqp->context);
+	ctx->pkts_len[ctx->pkts_n++] = length;
+	++ctx->pkts_tx_n;
+
+#endif /* MLX5_STUB */
 	return 0;
 }
 
@@ -2396,12 +2404,16 @@ MLX5_SEND_BURST_UNSAFE(MLX5_DB_METHOD_DB,			1,  1);
 /* burst family - send_flush */
 static inline int send_flush_unsafe(struct ibv_qp *ibqp, const int db_method)
 {
+#ifndef MLX5_STUB
 	struct mlx5_qp *qp = to_mqp(ibqp);
 	uint32_t curr_post = qp->gen_data.scur_post & 0xffff;
 	int size = ((int)curr_post - (int)qp->gen_data.last_post + (int)0x10000) & 0xffff;
 	unsigned long long *seg = mlx5_get_send_wqe(qp, qp->gen_data.last_post & (qp->sq.wqe_cnt - 1));
 
 	return __ring_db(qp, db_method, curr_post, seg, size);
+#else /* MLX5_STUB */
+	return 0;
+#endif /* MLX5_STUB */
 }
 
 static int mlx5_send_flush_safe(struct ibv_qp *ibqp) __MLX5_ALGN_F__;
@@ -2483,6 +2495,7 @@ static inline int recv_burst(struct mlx5_wq *rq, struct ibv_sge *sg_list, uint32
 static inline int recv_burst(struct mlx5_wq *rq, struct ibv_sge *sg_list, uint32_t num,
 			     const int thread_safe, const int max_one_sge, const int mp_rq)
 {
+#ifndef MLX5_STUB
 	struct mlx5_wqe_data_seg *scat;
 	unsigned int ind;
 	int i;
@@ -2528,6 +2541,7 @@ static inline int recv_burst(struct mlx5_wq *rq, struct ibv_sge *sg_list, uint32
 	if (thread_safe)
 		mlx5_unlock(&rq->lock);
 
+#endif /* MLX5_STUB */
 	return 0;
 }
 
@@ -2557,6 +2571,7 @@ MLX5_RECV_BURST_UNSAFE(1);
 static inline int mlx5_recv_pending(struct ibv_exp_wq *, uintptr_t);
 static inline int mlx5_recv_pending(struct ibv_exp_wq *ibwq, uintptr_t addr)
 {
+#ifndef MLX5_STUB
        unsigned int ind;
        struct mlx5_wqe_data_seg *scat;
        struct mlx5_rwq *rwq = to_mrwq(ibwq);
@@ -2566,6 +2581,7 @@ static inline int mlx5_recv_pending(struct ibv_exp_wq *ibwq, uintptr_t addr)
        scat = get_recv_wqe(rq, ind);
        scat->addr = htonll(addr);
        ++rq->head;
+#endif /* MLX5_STUB */
 
        return 0;
 }
@@ -2573,10 +2589,12 @@ static inline int mlx5_recv_pending(struct ibv_exp_wq *ibwq, uintptr_t addr)
 static inline void mlx5_recv_flush(struct ibv_exp_wq *);
 static inline void mlx5_recv_flush(struct ibv_exp_wq *ibwq)
 {
+#ifndef MLX5_STUB
        struct mlx5_rwq *rwq = to_mrwq(ibwq);
        struct mlx5_wq *rq = &rwq->rq;
 
        *rq->db = htonl(rq->head & 0xffff);
+#endif /* MLX5_STUB */
 }
 
 /*

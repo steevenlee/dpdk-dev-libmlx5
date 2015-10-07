@@ -1214,6 +1214,7 @@ static inline int32_t poll_cnt(struct ibv_cq *ibcq, uint32_t max_entries,
 			       const int use_lock, const int cqe_sz,
 			       const int cqe_ver)
 {
+#ifndef MLX5_STUB
 	struct mlx5_cq *cq = to_mcq(ibcq);
 	struct mlx5_resource *cur_rsc = NULL;
 	struct mlx5_cqe64 *cqe64;
@@ -1274,6 +1275,13 @@ static inline int32_t poll_cnt(struct ibv_cq *ibcq, uint32_t max_entries,
 		mlx5_unlock(&cq->lock);
 
 	return err == CQ_POLL_ERR ? -1 : npolled;
+#else /* MLX5_STUB */
+	struct mlx5_context *ctx = to_mctx(ibcq->context);
+	unsigned int n = ctx->pkts_tx_n;
+
+	ctx->pkts_tx_n = 0;
+	return n ? 2 : 0;
+#endif /* MLX5_STUB */
 }
 
 static inline int32_t get_rx_offloads_flags(struct mlx5_cqe64 *cqe) __attribute__((always_inline));
@@ -1300,6 +1308,7 @@ static inline int32_t poll_length(struct ibv_cq *ibcq, void *buf, uint32_t *inl,
 				  uint32_t *offset, uint32_t *flags,
 				  const int cqe_ver, uint16_t *vlan_cti)
 {
+#ifndef MLX5_STUB
 	struct mlx5_cq *cq = to_mcq(ibcq);
 	struct mlx5_resource *cur_rsc = NULL;
 	struct mlx5_cqe64 *cqe64;
@@ -1464,6 +1473,13 @@ out:
 		mlx5_unlock(&cq->lock);
 
 	return err == CQ_POLL_ERR ? -1 : size;
+#else /* MLX5_STUB */
+       struct mlx5_context *ctx = to_mctx(ibcq->context);
+
+       if (ctx->pkts_n)
+	       return ctx->pkts_len[--ctx->pkts_n];
+       return 0;
+#endif /* MLX5_STUB */
 }
 
 int32_t mlx5_poll_cnt_safe(struct ibv_cq *ibcq, uint32_t max) __MLX5_ALGN_F__;
@@ -1675,9 +1691,12 @@ int32_t mlx5_poll_length_flags_mp_rq_cvlan_unsafe_cqe128_v1(struct ibv_cq *cq, u
 static inline void poll_db(struct ibv_cq *ibcq) __attribute__((always_inline));
 static inline void poll_db(struct ibv_cq *ibcq)
 {
+#ifndef MLX5_STUB
        mlx5_update_cons_index(to_mcq(ibcq));
+#endif /* MLX5_STUB */
 }
 
+#ifndef MLX5_STUB
 static int32_t poll_length_rwq(struct mlx5_resource *cur_rsc, struct mlx5_cqe64 *cqe64,
 			       uint32_t *flags, const int cqe_format, void *buf,
 			       uint32_t *inl)
@@ -1704,6 +1723,7 @@ static int32_t poll_length_rwq(struct mlx5_resource *cur_rsc, struct mlx5_cqe64 
 
 	return size;
 }
+#endif /* MLX5_STUB */
 
 static inline void mlx5_uncompress_cqe(struct mlx5_cq *cq, uint32_t cqe_idx)
 	__attribute__((always_inline));
@@ -1780,6 +1800,7 @@ static inline int32_t mlx5_poll_length_flags_no_update(struct ibv_cq *ibcq,
 						      const int cqe_ver,
 						      uint16_t *vlan_cti)
 {
+#ifndef MLX5_STUB
 	struct mlx5_cq *cq = to_mcq(ibcq);
 	struct mlx5_resource *cur_rsc = NULL;
 	struct mlx5_cqe64 *cqe64;
@@ -1818,6 +1839,13 @@ static inline int32_t mlx5_poll_length_flags_no_update(struct ibv_cq *ibcq,
 		++cq->cons_index;
 
 	return size;
+#else /* MLX5_STUB */
+       struct mlx5_context *ctx = to_mctx(ibcq->context);
+
+       if (ctx->pkts_n)
+	       return ctx->pkts_len[--ctx->pkts_n];
+       return 0;
+#endif /* MLX5_STUB */
 }
 
 int32_t mlx5_poll_length_flags_no_update_cqe64(struct ibv_cq *cq, uint32_t *flags) __MLX5_ALGN_F__;
