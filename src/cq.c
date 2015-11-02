@@ -105,6 +105,18 @@ enum {
 	MLX5_COMPRESSED		= 0x3,
 };
 
+enum {
+	MLX5_CQE_L2_OK	= 1 << 0,
+	MLX5_CQE_L3_OK	= 1 << 1,
+	MLX5_CQE_L4_OK	= 1 << 2,
+};
+
+enum {
+	MLX5_CQE_L3_HDR_TYPE_NONE	= 0x0,
+	MLX5_CQE_L3_HDR_TYPE_IPV6	= 0x1,
+	MLX5_CQE_L3_HDR_TYPE_IPV4	= 0x2,
+};
+
 struct mlx5_err_cqe {
 	uint8_t		rsvd0[32];
 	uint32_t	srqn;
@@ -139,7 +151,9 @@ struct mlx5_cqe64 {
 	uint16_t	checksum;
 	uint16_t	slid;
 	uint32_t	flags_rqpn;
-	uint8_t		rsvd28[4];
+	uint8_t		hds_ip_ext;
+	uint8_t		l4_hdr_type_etc;
+	__be16		vlan_info;
 	uint32_t	srqn_uidx;
 	uint32_t	imm_inval_pkey;
 	uint8_t		rsvd40[4];
@@ -167,6 +181,11 @@ int mlx5_stall_cq_dec_step = 10;
 static inline int mlx5_get_cqe_format(struct mlx5_cqe64 *cqe)
 {
 	return (cqe->op_own & MLX5E_CQE_FORMAT_MASK) >> 2;
+}
+
+static inline uint8_t get_cqe_l3_hdr_type(struct mlx5_cqe64 *cqe)
+{
+	return (cqe->l4_hdr_type_etc >> 2) & 0x3;
 }
 
 static void *get_buf_cqe(struct mlx5_buf *buf, int n, int cqe_sz)
@@ -586,6 +605,7 @@ static inline int mlx5_poll_one(struct mlx5_cq *cq,
 	uint64_t exp_wc_flags = 0;
 	enum mlx5_rsc_type type = MLX5_RSC_TYPE_INVAL;
 	int cqe_format;
+	uint8_t l3_hdr;
 
 	cqe = next_cqe_sw(cq);
 	if (!cqe)
@@ -719,6 +739,19 @@ static inline int mlx5_poll_one(struct mlx5_cq *cq,
 	case MLX5_CQE_RESP_SEND_INV:
 		wc->status = handle_responder((struct ibv_wc *)wc, cqe64, mqp,
 					      is_srq ? *cur_srq : NULL, type);
+		if (mqp &&
+		    (mqp->gen_data.model_flags & MLX5_QP_MODEL_RX_CSUM_IP_OK_IP_NON_TCP_UDP)) {
+			l3_hdr = get_cqe_l3_hdr_type(cqe64);
+			exp_wc_flags |=
+				(!!(cqe64->hds_ip_ext & MLX5_CQE_L4_OK) *
+				 (uint64_t)IBV_EXP_WC_RX_TCP_UDP_CSUM_OK) |
+				(!!(cqe64->hds_ip_ext & MLX5_CQE_L3_OK) *
+				 (uint64_t)IBV_EXP_WC_RX_IP_CSUM_OK) |
+				((l3_hdr == MLX5_CQE_L3_HDR_TYPE_IPV4) *
+				 (uint64_t)IBV_EXP_WC_RX_IPV4_PACKET) |
+				((l3_hdr == MLX5_CQE_L3_HDR_TYPE_IPV6) *
+				 (uint64_t)IBV_EXP_WC_RX_IPV6_PACKET);
+		}
 		break;
 	case MLX5_CQE_RESIZE_CQ:
 		break;
@@ -1185,6 +1218,19 @@ static inline int32_t poll_cnt(struct ibv_cq *ibcq, uint32_t max_entries,
 static inline int32_t get_flags(struct mlx5_qp *cur_qp, struct mlx5_cqe64 *cqe) __attribute__((always_inline));
 static inline int32_t get_flags(struct mlx5_qp *cur_qp, struct mlx5_cqe64 *cqe)
 {
+	if (likely(cur_qp &&
+	    (cur_qp->gen_data.model_flags & MLX5_QP_MODEL_RX_CSUM_IP_OK_IP_NON_TCP_UDP))) {
+		uint8_t l3_hdr;
+		int32_t flags;
+
+		l3_hdr = get_cqe_l3_hdr_type(cqe);
+		flags = (!!(cqe->hds_ip_ext & MLX5_CQE_L4_OK) * IBV_EXP_CQ_RX_TCP_UDP_CSUM_OK) |
+			(!!(cqe->hds_ip_ext & MLX5_CQE_L3_OK) * IBV_EXP_CQ_RX_IP_CSUM_OK) |
+			((l3_hdr == MLX5_CQE_L3_HDR_TYPE_IPV4) * IBV_EXP_CQ_RX_IPV4_PACKET) |
+			((l3_hdr == MLX5_CQE_L3_HDR_TYPE_IPV6) * IBV_EXP_CQ_RX_IPV6_PACKET);
+		return flags;
+	}
+
 	return 0;
 }
 

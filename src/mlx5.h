@@ -353,6 +353,7 @@ struct mlx5_context {
 	int				num_bf_regs;
 	int				prefer_bf;
 	int				shut_up_bf;
+	int				enable_cqe_comp;
 	struct {
 		struct mlx5_resource  **table;
 		int			refcnt;
@@ -575,6 +576,7 @@ enum mlx5_qp_model_flags {
 	 */
 	MLX5_QP_MODEL_FLAG_THREAD_SAFE = 1 << 0,
 	MLX5_QP_MODEL_MULTI_PACKET_WQE = 1 << 1,
+	MLX5_QP_MODEL_RX_CSUM_IP_OK_IP_NON_TCP_UDP = 1 << 2,
 };
 
 struct mlx5_qp;

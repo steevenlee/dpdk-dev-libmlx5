@@ -123,6 +123,9 @@ int mlx5_query_device_ex(struct ibv_context *context,
 	if (ctx->cc.buf)
 		attr->exp_device_cap_flags |= IBV_EXP_DEVICE_DC_INFO;
 
+	if (attr->comp_mask & IBV_EXP_DEVICE_ATTR_EXP_CAP_FLAGS)
+		attr->exp_device_cap_flags &= (~IBV_EXP_DEVICE_VXLAN_SUPPORT);
+
 	return err;
 }
 
@@ -639,9 +642,9 @@ static struct ibv_cq *create_cq(struct ibv_context *context,
 		cmd_e.size_of_prefix = offsetof(struct mlx5_exp_create_cq,
 						prefix_reserved);
 		cmd_e.exp_data.comp_mask = MLX5_EXP_CREATE_CQ_MASK_CQE_COMP_EN |
-				  MLX5_EXP_CREATE_CQ_MASK_CQE_COMP_RECV_TYPE;
+					   MLX5_EXP_CREATE_CQ_MASK_CQE_COMP_RECV_TYPE;
 		if (mctx->cqe_comp_max_num) {
-			cmd_e.exp_data.cqe_comp_en = 1;
+			cmd_e.exp_data.cqe_comp_en = mctx->enable_cqe_comp ? 1 : 0;
 			cmd_e.exp_data.cqe_comp_recv_type = MLX5_CQE_FORMAT_HASH;
 		}
 	} else {
@@ -2798,6 +2801,7 @@ int mlx5_modify_qp_ex(struct ibv_qp *qp, struct ibv_exp_qp_attr *attr,
 	struct mlx5_qp *mqp = to_mqp(qp);
 	struct ibv_port_attr port_attr;
 	struct ibv_exp_modify_qp cmd;
+	struct ibv_exp_device_attr device_attr;
 	int ret;
 	uint32_t *db;
 
@@ -2807,6 +2811,17 @@ int mlx5_modify_qp_ex(struct ibv_qp *qp, struct ibv_exp_qp_attr *attr,
 		if (ret)
 			return ret;
 		mqp->link_layer = port_attr.link_layer;
+		if (((qp->qp_type == IBV_QPT_UD) && (mqp->link_layer == IBV_LINK_LAYER_INFINIBAND)) ||
+		    ((qp->qp_type == IBV_QPT_RAW_ETH) && (mqp->link_layer == IBV_LINK_LAYER_ETHERNET))) {
+			memset(&device_attr, 0, sizeof(device_attr));
+			device_attr.comp_mask = IBV_EXP_DEVICE_ATTR_RESERVED - 1;
+			ret = ibv_exp_query_device(qp->context, &device_attr);
+			if (ret)
+				return ret;
+			if ((device_attr.comp_mask & IBV_EXP_DEVICE_ATTR_EXP_CAP_FLAGS) &&
+			    (device_attr.exp_device_cap_flags & IBV_EXP_DEVICE_RX_CSUM_IP_PKT))
+				mqp->gen_data.model_flags |= MLX5_QP_MODEL_RX_CSUM_IP_OK_IP_NON_TCP_UDP;
+		}
 	}
 
 	if (mqp->rx_qp)
