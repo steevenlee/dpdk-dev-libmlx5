@@ -49,9 +49,11 @@
 #include "wqe.h"
 #include "doorbell.h"
 
+/* MLX5_HW_EXPORT_BEGIN */
 enum {
 	MLX5_CQ_DOORBELL			= 0x20
 };
+/* MLX5_HW_EXPORT_END */
 
 enum {
 	CQ_OK					=  0,
@@ -62,6 +64,7 @@ enum {
 #define MLX5_CQ_DB_REQ_NOT_SOL			(1 << 24)
 #define MLX5_CQ_DB_REQ_NOT			(0 << 24)
 
+/* MLX5_HW_EXPORT_BEGIN */
 enum {
 	MLX5_CQE_SYNDROME_LOCAL_LENGTH_ERR		= 0x01,
 	MLX5_CQE_SYNDROME_LOCAL_QP_OP_ERR		= 0x02,
@@ -91,6 +94,7 @@ enum {
 	MLX5_CQE_RESP_ERR	= 14,
 	MLX5_CQE_INVALID	= 15,
 };
+/* MLX5_HW_EXPORT_END */
 
 enum {
 	MLX5_CQ_MODIFY_RESEIZE = 0,
@@ -98,12 +102,14 @@ enum {
 	MLX5_CQ_MODIFY_MAPPING = 2,
 };
 
+/* MLX5_HW_EXPORT_BEGIN */
 enum {
 	MLX5_NO_INLINE_DATA	= 0x0,
 	MLX5_INLINE_DATA32_SEG	= 0x1,
 	MLX5_INLINE_DATA64_SEG	= 0x2,
 	MLX5_COMPRESSED		= 0x3,
 };
+/* MLX5_HW_EXPORT_END */
 
 enum {
 	MLX5_CQE_L2_OK	= 1 << 0,
@@ -125,6 +131,7 @@ enum {
 	MP_RQ_NUM_STRIDES_FIELD_SHIFT	= 16,
 };
 
+/* MLX5_HW_EXPORT_BEGIN */
 struct mlx5_err_cqe {
 	uint8_t		rsvd0[32];
 	uint32_t	srqn;
@@ -190,6 +197,7 @@ struct mlx5_cqe64 {
 	uint8_t		signature;
 	uint8_t		op_own;
 };
+/* MLX5_HW_EXPORT_END */
 
 int mlx5_stall_num_loop = 60;
 int mlx5_stall_cq_poll_min = 60;

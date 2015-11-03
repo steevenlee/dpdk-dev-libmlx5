@@ -46,12 +46,14 @@ enum {
 	MLX5_RWQ_FLAG_SIGNATURE		= 1 << 0,
 };
 
+/* MLX5_HW_EXPORT_BEGIN */
 enum {
 	MLX5_NUM_UUARS_PER_PAGE = 2,
 	MLX5_MAX_UAR_PAGES	= 1 << 8,
 	MLX5_MAX_UUARS		= MLX5_MAX_UAR_PAGES * MLX5_NUM_UUARS_PER_PAGE,
 	MLX5_DEF_TOT_UUARS	= 8 * MLX5_NUM_UUARS_PER_PAGE,
 };
+/* MLX5_HW_EXPORT_END */
 
 struct mlx5_alloc_ucontext {
 	struct ibv_get_context		ibv_req;

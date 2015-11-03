@@ -78,6 +78,7 @@ static const uint32_t mlx5_ib_opcode[] = {
 	[IBV_EXP_WR_UMR_INVALIDATE]             = MLX5_IB_OPCODE(MLX5_OPCODE_UMR,                 MLX5_OPCODE_BASIC, 0),
 };
 
+/* MLX5_HW_EXPORT_BEGIN */
 enum {
 	MLX5_CALC_UINT64_ADD    = 0x01,
 	MLX5_CALC_FLOAT64_ADD   = 0x02,
@@ -86,6 +87,7 @@ enum {
 	MLX5_CALC_UINT64_OR     = 0x05,
 	MLX5_CALC_UINT64_XOR    = 0x06
 };
+/* MLX5_HW_EXPORT_END */
 
 static const struct mlx5_calc_op {
 	int valid;
@@ -1780,6 +1782,7 @@ int mlx5_use_huge(struct ibv_context *context, const char *key)
 	return 0;
 }
 
+/* MLX5_HW_EXPORT_BEGIN */
 void *mlx5_find_rsc(struct mlx5_context *ctx, uint32_t rsn)
 {
 	int tind = rsn >> MLX5_QP_TABLE_SHIFT;
@@ -1789,6 +1792,7 @@ void *mlx5_find_rsc(struct mlx5_context *ctx, uint32_t rsn)
 	else
 		return NULL;
 }
+/* MLX5_HW_EXPORT_END */
 
 int mlx5_store_rsc(struct mlx5_context *ctx, uint32_t rsn, void *rsc)
 {

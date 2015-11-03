@@ -125,7 +125,9 @@
 
 #define PFX		"mlx5: "
 
+/* MLX5_HW_EXPORT_BEGIN */
 #define MLX5_MAX_PORTS_NUM	2
+/* MLX5_HW_EXPORT_END */
 
 enum {
 	MLX5_MAX_CQ_FAMILY_VER		= 1,
@@ -144,6 +146,7 @@ enum {
 	MLX5_WQ_PATTERN = 0x89AB0123
 };
 
+/* MLX5_HW_EXPORT_BEGIN */
 enum mlx5_lock_type {
 	MLX5_SPIN_LOCK = 0,
 	MLX5_MUTEX = 1,
@@ -154,6 +157,7 @@ enum mlx5_lock_state {
 	MLX5_LOCKED,
 	MLX5_UNLOCKED
 };
+/* MLX5_HW_EXPORT_END */
 
 enum {
 	MLX5_MMAP_GET_REGULAR_PAGES_CMD    = 0,
@@ -203,15 +207,18 @@ do {									\
 	#define mlx5_dbg(fp, mask, format, arg...)
 #endif
 
+/* MLX5_HW_EXPORT_BEGIN */
 enum {
 	MLX5_RCV_DBR	= 0,
 	MLX5_SND_DBR	= 1,
 };
+/* MLX5_HW_EXPORT_END */
 
 enum {
 	MLX5_STAT_RATE_OFFSET		= 5
 };
 
+/* MLX5_HW_EXPORT_BEGIN */
 enum {
 	MLX5_QP_TABLE_SHIFT		= 12,
 	MLX5_QP_TABLE_MASK		= (1 << MLX5_QP_TABLE_SHIFT) - 1,
@@ -223,6 +230,7 @@ enum {
 	MLX5_SRQ_TABLE_MASK		= (1 << MLX5_SRQ_TABLE_SHIFT) - 1,
 	MLX5_SRQ_TABLE_SIZE		= 1 << (24 - MLX5_SRQ_TABLE_SHIFT),
 };
+/* MLX5_HW_EXPORT_END */
 
 enum {
 	MLX5_DCT_TABLE_SHIFT		= 12,
@@ -230,15 +238,18 @@ enum {
 	MLX5_DCT_TABLE_SIZE		= 1 << (24 - MLX5_DCT_TABLE_SHIFT),
 };
 
+/* MLX5_HW_EXPORT_BEGIN */
 enum {
 	MLX5_SEND_WQE_BB	= 64,
 	MLX5_SEND_WQE_SHIFT	= 6,
 };
+/* MLX5_HW_EXPORT_END */
 
 enum {
 	MLX5_BF_OFFSET	= 0x800
 };
 
+/* MLX5_HW_EXPORT_BEGIN */
 enum {
 	MLX5_INLINE_SCATTER_32	= 0x4,
 	MLX5_INLINE_SCATTER_64	= 0x8,
@@ -293,6 +304,7 @@ enum mlx5_alloc_type {
 	MLX5_ALLOC_TYPE_PREFER_CONTIG,
 	MLX5_ALLOC_TYPE_ALL
 };
+/* MLX5_HW_EXPORT_END */
 
 enum mlx5_mr_type {
 	MLX5_NORMAL_MR	= 0x0,
@@ -314,6 +326,7 @@ struct mlx5_device {
 	int	driver_abi_ver;
 };
 
+/* MLX5_HW_EXPORT_BEGIN */
 enum mlx5_rsc_type {
 	MLX5_RSC_TYPE_QP,
 	MLX5_RSC_TYPE_DCT,
@@ -328,9 +341,11 @@ struct mlx5_resource {
 	enum mlx5_rsc_type	type;
 	uint32_t		rsn;
 };
+/* MLX5_HW_EXPORT_END */
 
 struct mlx5_db_page;
 
+/* MLX5_HW_EXPORT_BEGIN */
 struct mlx5_lock {
 	pthread_mutex_t                 mutex;
 	pthread_spinlock_t              slock;
@@ -451,6 +466,7 @@ struct mlx5_context {
 	} core_clock;
 	void			       *hca_core_clock;
 };
+/* MLX5_HW_EXPORT_END */
 
 struct mlx5_bitmap {
 	uint32_t		last;
@@ -468,10 +484,12 @@ struct mlx5_hugetlb_mem {
 	struct list_head	list;
 };
 
+/* MLX5_HW_EXPORT_BEGIN */
 struct mlx5_numa_req {
 	int valid;
 	int numa_id;
 };
+
 struct mlx5_buf {
 	void			       *buf;
 	size_t				length;
@@ -481,6 +499,7 @@ struct mlx5_buf {
 	struct mlx5_numa_req		numa_req;
 	int				numa_alloc;
 };
+/* MLX5_HW_EXPORT_END */
 
 struct mlx5_pd {
 	struct ibv_pd			ibv_pd;
@@ -509,6 +528,7 @@ enum mlx5_cq_creation_flags {
 	MLX5_CQ_CREATION_FLAG_COMPLETION_TIMESTAMP = 1 << 0,
 };
 
+/* MLX5_HW_EXPORT_BEGIN */
 struct mlx5_cq {
 	struct ibv_cq			ibv_cq;
 	uint32_t			creation_flags;
@@ -556,12 +576,14 @@ struct mlx5_srq {
 	struct ibv_srq_legacy *ibv_srq_legacy;
 	int				is_xsrq;
 };
+/* MLX5_HW_EXPORT_END */
 
 struct wr_list {
 	uint16_t	opcode;
 	uint16_t	next;
 };
 
+/* MLX5_HW_EXPORT_BEGIN */
 struct mlx5_wq {
 	/* common hot data */
 	uint64_t		       *wrid;
@@ -603,6 +625,7 @@ struct mlx5_bf {
 	unsigned			uuarn;
 	enum mlx5_db_method		db_method;
 };
+/* MLX5_HW_EXPORT_END */
 
 struct mlx5_mr {
 	struct ibv_mr			ibv_mr;
@@ -622,7 +645,9 @@ enum mlx5_qp_model_flags {
 	MLX5_QP_MODEL_RX_CSUM_IP_OK_IP_NON_TCP_UDP = 1 << 2,
 };
 
+/* MLX5_HW_EXPORT_BEGIN */
 struct mlx5_qp;
+
 struct general_data_hot {
 	/* post_send hot data */
 	unsigned		*wqe_head;
@@ -641,6 +666,8 @@ struct general_data_hot {
 	uint8_t			 fm_cache;
 	uint8_t			 model_flags; /* use mlx5_qp_model_flags */
 };
+/* MLX5_HW_EXPORT_END */
+
 enum mpw_states {
 	MLX5_MPW_STATE_CLOSED,
 	MLX5_MPW_STATE_OPENED,
@@ -651,6 +678,8 @@ enum {
 	MLX5_MAX_MPW_SGE = 5,
 	MLX5_MAX_MPW_SIZE = 0x3FFF
 };
+
+/* MLX5_HW_EXPORT_BEGIN */
 struct mpw_data {
 	uint8_t		state; /* use mpw_states */
 	uint8_t		size;
@@ -672,6 +701,7 @@ struct general_data_warm {
 struct odp_data {
 	struct mlx5_pd		*pd;
 };
+
 struct data_seg_data {
 	uint32_t	max_inline_data;
 };
@@ -681,6 +711,7 @@ struct ctrl_seg_data {
 	uint8_t		fm_ce_se_acc[32];
 	uint8_t		wq_sig;
 };
+
 struct mlx5_qp {
 	struct mlx5_resource		rsc;
 	struct verbs_qp			verbs_qp;
@@ -719,6 +750,7 @@ struct mlx5_qp {
 	struct mlx5_wq_recv_send_enable sq_enable;
 	int rx_qp;
 };
+/* MLX5_HW_EXPORT_END */
 
 struct mlx5_dct {
 	struct mlx5_resource		rsc;
@@ -777,10 +809,12 @@ struct mlx5_rwq {
 	uint8_t model_flags; /* use mlx5_wq_model_flags */
 };
 
+/* MLX5_HW_EXPORT_BEGIN */
 struct mlx5_ah {
 	struct ibv_ah			ibv_ah;
 	struct mlx5_wqe_av		av;
 };
+/* MLX5_HW_EXPORT_END */
 
 struct mlx5_verbs_srq {
 	struct mlx5_srq msrq;
@@ -869,9 +903,11 @@ static inline void *align_ptr(void *p, unsigned long algn)
 	return (void *)align((unsigned long)p, algn);
 }
 
+/* MLX5_HW_EXPORT_BEGIN */
 #define to_mxxx(xxx, type)						\
 	((struct mlx5_##type *)					\
-	 ((void *) ib##xxx - offsetof(struct mlx5_##type, ibv_##xxx)))
+	 (ib##xxx - offsetof(struct mlx5_##type, ibv_##xxx)))
+/* MLX5_HW_EXPORT_END */
 
 static inline struct mlx5_device *to_mdev(struct ibv_device *ibdev)
 {
@@ -892,10 +928,12 @@ static inline struct mlx5_pd *to_mpd(struct ibv_pd *ibpd)
 	return to_mxxx(pd, pd);
 }
 
+/* MLX5_HW_EXPORT_BEGIN */
 static inline struct mlx5_cq *to_mcq(struct ibv_cq *ibcq)
 {
 	return to_mxxx(cq, cq);
 }
+/* MLX5_HW_EXPORT_END */
 
 static inline struct mlx5_srq *to_msrq(struct ibv_srq *ibsrq)
 {
@@ -904,12 +942,14 @@ static inline struct mlx5_srq *to_msrq(struct ibv_srq *ibsrq)
 	return container_of(vsrq, struct mlx5_srq, vsrq);
 }
 
+/* MLX5_HW_EXPORT_BEGIN */
 static inline struct mlx5_qp *to_mqp(struct ibv_qp *ibqp)
 {
 	struct verbs_qp *vqp = (struct verbs_qp *)ibqp;
 
 	return container_of(vqp, struct mlx5_qp, verbs_qp);
 }
+/* MLX5_HW_EXPORT_END */
 
 static inline struct mlx5_dct *to_mdct(struct ibv_exp_dct *ibdct)
 {
@@ -1063,7 +1103,9 @@ void mlx5_calc_sq_wqe_size(struct ibv_qp_cap *cap, enum ibv_qp_type type,
 void mlx5_set_sq_sizes(struct mlx5_qp *qp, struct ibv_qp_cap *cap,
 		       enum ibv_qp_type type);
 int mlx5_store_rsc(struct mlx5_context *ctx, uint32_t rsn, void *rsc);
+/* MLX5_HW_EXPORT_BEGIN */
 void *mlx5_find_rsc(struct mlx5_context *ctx, uint32_t rsn);
+/* MLX5_HW_EXPORT_END */
 void mlx5_clear_rsc(struct mlx5_context *ctx, uint32_t rsn);
 uint32_t mlx5_store_uidx(struct mlx5_context *ctx, void *rsc);
 void mlx5_clear_uidx(struct mlx5_context *ctx, uint32_t uidx);

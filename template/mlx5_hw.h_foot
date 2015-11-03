@@ -1,0 +1,105 @@
+struct ibv_mlx5_qp_info {
+	uint32_t	qpn;
+	volatile uint32_t	*dbrec;
+	struct {
+		void		*buf;
+		unsigned	wqe_cnt;
+		unsigned	stride;
+	} sq, rq;
+	struct {
+		void		*reg;
+		unsigned	size;
+		int             need_lock;
+	} bf;
+};
+
+static inline int ibv_mlx5_exp_get_qp_info(struct ibv_qp *qp, struct	ibv_mlx5_qp_info *qp_info)
+{
+	struct mlx5_qp *mqp = to_mqp(qp);
+
+	if ((mqp->gen_data.scur_post != 0) || (mqp->rq.head != 0))
+		return -1;
+
+	qp_info->qpn = mqp->ctrl_seg.qp_num;
+	qp_info->dbrec = mqp->gen_data.db;
+	qp_info->sq.buf = (void *)((uintptr_t)mqp->buf.buf + mqp->sq.offset);
+	qp_info->sq.wqe_cnt = mqp->sq.wqe_cnt;
+	qp_info->sq.stride = 1 << mqp->sq.wqe_shift;
+	qp_info->rq.buf = (void *)((uintptr_t)mqp->buf.buf + mqp->rq.offset);
+	qp_info->rq.wqe_cnt = mqp->rq.wqe_cnt;
+	qp_info->rq.stride = 1 << mqp->rq.wqe_shift;
+	qp_info->bf.reg = mqp->gen_data.bf->reg;
+	qp_info->bf.need_lock = mqp->gen_data.bf->need_lock;
+
+	if (mqp->gen_data.bf->uuarn > 0)
+		qp_info->bf.size = mqp->gen_data.bf->buf_size;
+	else
+		qp_info->bf.size = 0;
+
+	return 0;
+}
+
+struct ibv_mlx5_cq_info {
+	uint32_t	cqn;
+	unsigned	cqe_cnt;
+	void		*buf;
+	volatile uint32_t	*dbrec;
+	unsigned	cqe_size;
+};
+
+static inline int ibv_mlx5_exp_get_cq_info(struct ibv_cq *cq, struct	ibv_mlx5_cq_info *cq_info)
+{
+	struct mlx5_cq *mcq = to_mcq(cq);
+
+	if (mcq->cons_index != 0)
+		return -1;
+
+	cq_info->cqn = mcq->cqn;
+	cq_info->cqe_cnt = mcq->ibv_cq.cqe + 1;
+	cq_info->cqe_size = mcq->cqe_sz;
+	cq_info->buf = mcq->active_buf->buf;
+	cq_info->dbrec = mcq->dbrec;
+
+	return 0;
+}
+
+struct ibv_mlx5_srq_info {
+	void		*buf;
+	volatile uint32_t	*dbrec;
+	unsigned	stride;
+	unsigned	head;
+	unsigned	tail;
+};
+
+static inline int ibv_mlx5_exp_get_srq_info(struct ibv_srq *srq, struct ibv_mlx5_srq_info *srq_info)
+{
+	struct mlx5_srq *msrq;
+
+	if (srq->handle == LEGACY_XRC_SRQ_HANDLE)
+	srq = (struct ibv_srq *)(((struct ibv_srq_legacy *)srq)->ibv_srq);
+
+	msrq = container_of(srq, struct mlx5_srq, vsrq.srq);
+
+	if (msrq->counter != 0)
+		return -1;
+
+	srq_info->buf = msrq->buf.buf;
+	srq_info->dbrec = msrq->db;
+	srq_info->stride = 1 << msrq->wqe_shift;
+	srq_info->head = msrq->head;
+	srq_info->tail = msrq->tail;
+
+	return 0;
+}
+
+static inline void ibv_mlx5_exp_update_cq_ci(struct ibv_cq *cq, unsigned cq_ci)
+{
+	struct mlx5_cq *mcq = to_mcq(cq);
+
+	mcq->cons_index = cq_ci;
+}
+
+#undef likely
+#undef unlikely
+
+#endif /* MLX_HW_H_ */

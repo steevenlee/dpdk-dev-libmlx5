@@ -33,6 +33,7 @@
 #ifndef WQE_H
 #define WQE_H
 
+/* MLX5_HW_EXPORT_BEGIN */
 enum {
 	MLX5_WQE_CTRL_CQ_UPDATE	= 2 << 2,
 	MLX5_WQE_CTRL_SOLICITED	= 1 << 1,
@@ -46,6 +47,7 @@ enum {
 enum {
 	MLX5_EXTENDED_UD_AV	= 0x80000000,
 };
+/* MLX5_HW_EXPORT_END */
 
 enum {
 	MLX5_FENCE_MODE_NONE			= 0 << 5,
@@ -54,6 +56,7 @@ enum {
 	MLX5_FENCE_MODE_SMALL_AND_FENCE		= 4 << 5,
 };
 
+/* MLX5_HW_EXPORT_BEGIN */
 struct mlx5_wqe_srq_next_seg {
 	uint8_t			rsvd0[2];
 	uint16_t		next_wqe_index;
@@ -76,6 +79,7 @@ struct mlx5_eqe_qp_srq {
 	uint32_t	reserved[6];
 	uint32_t	qp_srq_n;
 };
+/* MLX5_HW_EXPORT_END */
 
 enum {
 	MLX5_ETH_WQE_L3_CSUM	=	(1 << 6),
@@ -97,6 +101,7 @@ struct mlx5_wqe_eth_seg {
 	uint8_t		inline_hdr[16];
 };
 
+/* MLX5_HW_EXPORT_BEGIN */
 struct mlx5_wqe_ctrl_seg {
 	uint32_t	opmod_idx_opcode;
 	uint32_t	qpn_ds;
@@ -173,6 +178,7 @@ struct mlx5_wqe_umr_ctrl_seg {
 	uint64_t	mkey_mask;
 	uint8_t		rsvd1[32];
 };
+/* MLX5_HW_EXPORT_END */
 
 struct mlx5_mkey_seg {
 	/* This is a two bit field occupying bits 31-30.
@@ -196,6 +202,7 @@ struct mlx5_mkey_seg {
 	uint8_t		rsvd4[4];
 };
 
+/* MLX5_HW_EXPORT_BEGIN */
 struct mlx5_seg_set_psv {
 	uint8_t		rsvd[4];
 	uint16_t	syndrome;
@@ -228,6 +235,7 @@ struct mlx5_seg_check_psv {
 	uint64_t	va;
 	uint32_t	psv_index[4];
 };
+/* MLX5_HW_EXPORT_END */
 
 struct mlx5_klm {
 	uint32_t	byte_count;
@@ -251,6 +259,7 @@ struct mlx5_seg_repeat_block {
 	struct mlx5_seg_repeat_ent	entries[0];
 };
 
+/* MLX5_HW_EXPORT_BEGIN */
 struct mlx5_rwqe_sig {
 	uint8_t		rsvd0[4];
 	uint8_t		signature;
@@ -272,6 +281,7 @@ struct mlx5_wqe_wait_en_seg {
 	uint32_t	pi;
 	uint32_t	obj_num;
 };
+/* MLX5_HW_EXPORT_END */
 
 enum {
 	MLX5_MKEY_MASK_LEN		= 1ull << 0,
