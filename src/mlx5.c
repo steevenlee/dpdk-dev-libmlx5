@@ -641,7 +641,7 @@ static int mlx5_alloc_context(struct verbs_device *vdev,
 {
 	struct mlx5_context	       *context;
 	struct mlx5_alloc_ucontext	req;
-	struct mlx5_alloc_ucontext_resp resp;
+	struct mlx5_exp_alloc_ucontext_resp resp;
 	struct ibv_device		*ibdev = &vdev->device;
 	struct verbs_context *verbs_ctx = verbs_get_ctx(ctx);
 	struct ibv_exp_device_attr attr;
@@ -649,7 +649,7 @@ static int mlx5_alloc_context(struct verbs_device *vdev,
 	int	page_size = to_mdev(ibdev)->page_size;
 	int	tot_uuars;
 	int	low_lat_uuars;
-	int 	gross_uuars;
+	int	gross_uuars;
 	int	j;
 	int	uar_mapped;
 	off_t	offset;
@@ -700,7 +700,13 @@ static int mlx5_alloc_context(struct verbs_device *vdev,
 	context->max_desc_sz_sq_dc = resp.max_desc_sz_sq_dc;
 	context->atomic_sizes_dc = resp.atomic_sizes_dc;
 	context->compact_av = resp.flags & MLX5_CAP_COMPACT_AV;
-	context->cqe_version = resp.cqe_version;
+
+	if (resp.exp_data.comp_mask & MLX5_EXP_ALLOC_CTX_RESP_MASK_CQE_COMP_MAX_NUM)
+		context->cqe_comp_max_num = resp.exp_data.cqe_comp_max_num;
+
+	if (resp.exp_data.comp_mask & MLX5_EXP_ALLOC_CTX_RESP_MASK_CQE_VERSION)
+		context->cqe_version = resp.exp_data.cqe_version;
+
 	if (context->cqe_version) {
 		if (context->cqe_version == 1) {
 			mlx5_ctx_ops.poll_cq = mlx5_poll_cq_1;

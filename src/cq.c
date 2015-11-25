@@ -98,6 +98,13 @@ enum {
 	MLX5_CQ_MODIFY_MAPPING = 2,
 };
 
+enum {
+	MLX5_NO_INLINE_DATA	= 0x0,
+	MLX5_INLINE_DATA32_SEG	= 0x1,
+	MLX5_INLINE_DATA64_SEG	= 0x2,
+	MLX5_COMPRESSED		= 0x3,
+};
+
 struct mlx5_err_cqe {
 	uint8_t		rsvd0[32];
 	uint32_t	srqn;
@@ -110,10 +117,26 @@ struct mlx5_err_cqe {
 	uint8_t		op_own;
 };
 
+struct mlx5_mini_cqe8 {
+	union {
+		uint32_t rx_hash_result;
+		uint32_t checksum;
+		struct {
+			uint16_t wqe_counter;
+			uint8_t  s_wqe_opcode;
+			uint8_t  reserved;
+		} s_wqe_info;
+	};
+	uint32_t byte_cnt;
+};
+
 struct mlx5_cqe64 {
-	uint8_t		rsvd0[17];
+	uint8_t		rsvd0[12];
+	uint32_t	rx_hash_res;
+	uint8_t		rx_hash_type;
 	uint8_t		ml_path;
-	uint8_t		rsvd20[4];
+	uint8_t		rsvd20[2];
+	uint16_t	checksum;
 	uint16_t	slid;
 	uint32_t	flags_rqpn;
 	uint8_t		rsvd28[4];
@@ -122,7 +145,13 @@ struct mlx5_cqe64 {
 	uint8_t		rsvd40[4];
 	uint32_t	byte_cnt;
 	__be64		timestamp;
-	uint32_t	sop_drop_qpn;
+	union {
+		uint32_t	sop_drop_qpn;
+		struct {
+			uint8_t	sop;
+			uint8_t qpn[3];
+		} sop_qpn;
+	};
 	uint16_t	wqe_counter;
 	uint8_t		signature;
 	uint8_t		op_own;
@@ -134,6 +163,12 @@ int mlx5_stall_cq_poll_max = 100000;
 int mlx5_stall_cq_inc_step = 100;
 int mlx5_stall_cq_dec_step = 10;
 
+#define MLX5E_CQE_FORMAT_MASK 0xc
+static inline int mlx5_get_cqe_format(struct mlx5_cqe64 *cqe)
+{
+	return (cqe->op_own & MLX5E_CQE_FORMAT_MASK) >> 2;
+}
+
 static void *get_buf_cqe(struct mlx5_buf *buf, int n, int cqe_sz)
 {
 	return buf->buf + n * cqe_sz;
@@ -144,7 +179,8 @@ static void *get_cqe(struct mlx5_cq *cq, int n)
 	return cq->active_buf->buf + n * cq->cqe_sz;
 }
 
-static void *get_sw_cqe(struct mlx5_cq *cq, int n)
+static inline void *get_sw_cqe(struct mlx5_cq *cq, int n) __attribute__((always_inline));
+static inline void *get_sw_cqe(struct mlx5_cq *cq, int n)
 {
 	void *cqe = get_cqe(cq, n & cq->ibv_cq.cqe);
 	struct mlx5_cqe64 *cqe64;
@@ -215,16 +251,17 @@ static int handle_responder(struct ibv_wc *wc, struct mlx5_cqe64 *cqe,
 	struct mlx5_wq *wq;
 	uint8_t g;
 	int err = 0;
+	int cqe_format = mlx5_get_cqe_format(cqe);
 
 	wc->byte_len = ntohl(cqe->byte_cnt);
 	if (srq) {
 		wqe_ctr = ntohs(cqe->wqe_counter);
 		wc->wr_id = srq->wrid[wqe_ctr];
 		mlx5_free_srq_wqe(srq, wqe_ctr);
-		if (cqe->op_own & MLX5_INLINE_SCATTER_32)
+		if (cqe_format == MLX5_INLINE_DATA32_SEG)
 			err = mlx5_copy_to_recv_srq(srq, wqe_ctr, cqe,
 						    wc->byte_len);
-		else if (cqe->op_own & MLX5_INLINE_SCATTER_64)
+		else if (cqe_format == MLX5_INLINE_DATA64_SEG)
 			err = mlx5_copy_to_recv_srq(srq, wqe_ctr, cqe - 1,
 						    wc->byte_len);
 	} else {
@@ -232,10 +269,10 @@ static int handle_responder(struct ibv_wc *wc, struct mlx5_cqe64 *cqe,
 		wqe_ctr = wq->tail & (wq->wqe_cnt - 1);
 		wc->wr_id = wq->wrid[wqe_ctr];
 		++wq->tail;
-		if (cqe->op_own & MLX5_INLINE_SCATTER_32)
+		if (cqe_format == MLX5_INLINE_DATA32_SEG)
 			err = mlx5_copy_to_recv_wqe(qp, wqe_ctr, cqe,
 						    wc->byte_len);
-		else if (cqe->op_own & MLX5_INLINE_SCATTER_64)
+		else if (cqe_format == MLX5_INLINE_DATA64_SEG)
 			err = mlx5_copy_to_recv_wqe(qp, wqe_ctr, cqe - 1,
 						    wc->byte_len);
 	}
@@ -457,6 +494,66 @@ static int is_responder(uint8_t opcode)
 	return 0;
 }
 
+static inline void copy_cqes(struct mlx5_cq *cq, struct mlx5_mini_cqe8 *mini_array,
+			     struct mlx5_cqe64 *title, int cnt, uint16_t wqe_cnt, int cqe_idx)
+	__attribute__((always_inline));
+static inline void copy_cqes(struct mlx5_cq *cq, struct mlx5_mini_cqe8 *mini_array,
+			     struct mlx5_cqe64 *title, int cnt, uint16_t wqe_cnt, int cqe_idx)
+{
+	struct mlx5_cqe64 *cqe;
+	int i;
+	int is_req = is_requestor(title->op_own >> 4);
+	int log_size = cq->cq_log_size;
+	uint8_t opown = title->op_own & 0xf2;
+
+	for (i = 0; i < cnt; i++) {
+		cqe = get_cqe(cq, (cqe_idx + i) & cq->ibv_cq.cqe);
+		memcpy(cqe, title, sizeof(*title));
+		cqe->byte_cnt = mini_array[i].byte_cnt;
+		cqe->op_own = opown | (((cqe_idx + i) >> log_size) & 1);
+		if (is_req) {
+			cqe->wqe_counter = mini_array[i].s_wqe_info.wqe_counter;
+			cqe->sop_qpn.sop = mini_array[i].s_wqe_info.s_wqe_opcode;
+		} else {
+			/* for now we are supporting only rx_hash_res not
+			 * checksum */
+			cqe->rx_hash_res = mini_array[i].rx_hash_result;
+			cqe->wqe_counter = htons(wqe_cnt + i);
+		}
+	}
+}
+
+static inline void mlx5_decompress_cqe_idx(struct mlx5_cq *cq, uint32_t cqe_idx)
+	__attribute__((always_inline));
+static inline void mlx5_decompress_cqe_idx(struct mlx5_cq *cq, uint32_t cqe_idx)
+{
+	struct mlx5_cqe64 *title, *cqe;
+	struct mlx5_mini_cqe8 mini_array[8];
+	int cqe_cnt;
+	uint16_t wqe_cnt;
+
+	cqe = get_cqe(cq, cqe_idx & cq->ibv_cq.cqe);
+	title = cqe;
+	memcpy(mini_array, get_cqe(cq, (cqe_idx + 1) & cq->ibv_cq.cqe), sizeof(*title));
+	cqe_cnt = ntohl(title->byte_cnt);
+	wqe_cnt = ntohs(title->wqe_counter);
+
+	for (; cqe_cnt > 7; cqe_idx += 8, cqe_cnt -= 8, wqe_cnt += 8) {
+		copy_cqes(cq, mini_array, title, 8, wqe_cnt, cqe_idx);
+		cqe = get_cqe(cq, (cqe_idx + 8) & cq->ibv_cq.cqe);
+		memcpy(mini_array, cqe, sizeof(*title));
+	}
+
+	copy_cqes(cq, mini_array, title, cqe_cnt, wqe_cnt, cqe_idx);
+}
+
+static inline void mlx5_decompress_cqe(struct mlx5_cq *cq)
+	__attribute__((always_inline));
+static inline void mlx5_decompress_cqe(struct mlx5_cq *cq)
+{
+	mlx5_decompress_cqe_idx(cq, cq->cons_index);
+}
+
 static inline int mlx5_poll_one(struct mlx5_cq *cq,
 				struct mlx5_resource **cur_rsc,
 				struct mlx5_srq **cur_srq, struct ibv_exp_wc *wc,
@@ -488,10 +585,15 @@ static inline int mlx5_poll_one(struct mlx5_cq *cq,
 	struct mlx5_dct *mdct;
 	uint64_t exp_wc_flags = 0;
 	enum mlx5_rsc_type type = MLX5_RSC_TYPE_INVAL;
+	int cqe_format;
 
 	cqe = next_cqe_sw(cq);
 	if (!cqe)
 		return CQ_EMPTY;
+
+	cqe_format = mlx5_get_cqe_format(cqe);
+	if (unlikely(cqe_format == MLX5_COMPRESSED))
+		mlx5_decompress_cqe(cq);
 
 	cqe64 = (cq->cqe_sz == 64) ? cqe : cqe + 64;
 
@@ -598,10 +700,10 @@ static inline int mlx5_poll_one(struct mlx5_cq *cq,
 		wqe_ctr = ntohs(cqe64->wqe_counter);
 		idx = wqe_ctr & (wq->wqe_cnt - 1);
 		handle_good_req((struct ibv_wc *)wc, cqe64);
-		if (cqe64->op_own & MLX5_INLINE_SCATTER_32)
+		if (cqe_format == MLX5_INLINE_DATA32_SEG)
 			err = mlx5_copy_to_send_wqe(mqp, wqe_ctr, cqe,
 						    wc->byte_len);
-		else if (cqe64->op_own & MLX5_INLINE_SCATTER_64)
+		else if (cqe_format == MLX5_INLINE_DATA64_SEG)
 			err = mlx5_copy_to_send_wqe(mqp, wqe_ctr, cqe - 1,
 						    wc->byte_len);
 		else
@@ -834,9 +936,13 @@ void __mlx5_cq_clean(struct mlx5_cq *cq, uint32_t rsn_uidx, struct mlx5_srq *srq
 	 * from our QP and therefore don't need to be checked.
 	 */
 	cqe_version = (to_mctx(cq->ibv_cq.context))->cqe_version;
-	for (prod_index = cq->cons_index; get_sw_cqe(cq, prod_index); ++prod_index)
+	for (prod_index = cq->cons_index; (cqe = get_sw_cqe(cq, prod_index)); ++prod_index) {
+		if (mlx5_get_cqe_format(cqe) == MLX5_COMPRESSED)
+			mlx5_decompress_cqe_idx(cq, prod_index);
+
 		if (prod_index == cq->cons_index + cq->ibv_cq.cqe)
 			break;
+	}
 
 	/*
 	 * Now sweep backwards through the CQ, removing CQ entries
@@ -1036,6 +1142,9 @@ static inline int32_t poll_cnt(struct ibv_cq *ibcq, uint32_t max_entries,
 			break;
 		}
 
+		if (unlikely(mlx5_get_cqe_format(cqe64) == MLX5_COMPRESSED))
+			mlx5_decompress_cqe(cq);
+
 		cur_rsc = find_rsc(cq, cqe64, cqe_ver);
 		if (unlikely(!cur_rsc)) {
 			err = CQ_POLL_ERR;
@@ -1094,6 +1203,7 @@ static inline int32_t poll_length(struct ibv_cq *ibcq, void *buf, uint32_t *inl,
 	int32_t size = 0;
 	uint16_t wqe_ctr;
 	int err = CQ_OK;
+	int cqe_format;
 
 	if (unlikely(use_lock))
 		pthread_spin_lock(&cq->lock.lock);
@@ -1101,6 +1211,12 @@ static inline int32_t poll_length(struct ibv_cq *ibcq, void *buf, uint32_t *inl,
 	cqe64 = get_next_cqe(cq, cqe_sz);
 
 	if (cqe64) {
+		cqe_format = mlx5_get_cqe_format(cqe64);
+		if (unlikely(cqe_format == MLX5_COMPRESSED)) {
+			mlx5_decompress_cqe(cq);
+			cqe_format = 0;
+		}
+
 		if (unlikely((cqe64->op_own >> 4) != MLX5_CQE_RESP_SEND)) {
 			if (cqe64->op_own >> 4 == MLX5_CQE_RESP_ERR)
 				fprintf(stderr, "poll_length, CQE response error, syndrome=%u, vendor syndrome error=%u\n",
@@ -1128,8 +1244,8 @@ static inline int32_t poll_length(struct ibv_cq *ibcq, void *buf, uint32_t *inl,
 
 		size = ntohl(cqe64->byte_cnt);
 
-		if (unlikely(cqe64->op_own & (MLX5_INLINE_SCATTER_32 | MLX5_INLINE_SCATTER_64))) {
-			void *data = cqe64->op_own & MLX5_INLINE_SCATTER_32 ? cqe64 : cqe64 - 1;
+		if (unlikely(cqe_format)) {
+			void *data = (cqe_format == MLX5_INLINE_DATA32_SEG) ? cqe64 : cqe64 - 1;
 
 			if (buf) {
 				*inl = 1;

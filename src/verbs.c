@@ -495,12 +495,13 @@ static struct ibv_cq *create_cq(struct ibv_context *context,
 	struct mlx5_exp_create_cq	cmd_e;
 	struct mlx5_create_cq_resp	resp;
 	struct mlx5_cq		       *cq;
+	struct mlx5_context		*mctx = to_mctx(context);
 	int				cqe_sz;
 	int				ret;
 	int				ncqe;
 	int				thread_safe;
 #ifdef MLX5_DEBUG
-	FILE *fp = to_mctx(context)->dbg_fp;
+	FILE *fp = mctx->dbg_fp;
 #endif
 
 	if (!cqe) {
@@ -557,12 +558,12 @@ static struct ibv_cq *create_cq(struct ibv_context *context,
 		goto err_spl;
 	}
 
-	if (mlx5_alloc_cq_buf(to_mctx(context), cq, &cq->buf_a, ncqe, cqe_sz)) {
+	if (mlx5_alloc_cq_buf(mctx, cq, &cq->buf_a, ncqe, cqe_sz)) {
 		mlx5_dbg(fp, MLX5_DBG_CQ, "\n");
 		goto err_spl;
 	}
 
-	cq->dbrec  = mlx5_alloc_dbrec(to_mctx(context));
+	cq->dbrec  = mlx5_alloc_dbrec(mctx);
 	if (!cq->dbrec) {
 		mlx5_dbg(fp, MLX5_DBG_CQ, "\n");
 		goto err_buf;
@@ -573,17 +574,25 @@ static struct ibv_cq *create_cq(struct ibv_context *context,
 	cq->arm_sn			= 0;
 	cq->cqe_sz			= cqe_sz;
 
-	if (attr->comp_mask) {
+	if (attr->comp_mask || mctx->cqe_comp_max_num) {
 		cmd_e.buf_addr = (uintptr_t) cq->buf_a.buf;
 		cmd_e.db_addr  = (uintptr_t) cq->dbrec;
 		cmd_e.cqe_size = cqe_sz;
+		cmd_e.size_of_prefix = offsetof(struct mlx5_exp_create_cq,
+						prefix_reserved);
+		cmd_e.exp_data.comp_mask = MLX5_EXP_CREATE_CQ_MASK_CQE_COMP_EN |
+				  MLX5_EXP_CREATE_CQ_MASK_CQE_COMP_RECV_TYPE;
+		if (mctx->cqe_comp_max_num) {
+			cmd_e.exp_data.cqe_comp_en = 1;
+			cmd_e.exp_data.cqe_comp_recv_type = MLX5_CQE_FORMAT_HASH;
+		}
 	} else {
 		cmd.buf_addr = (uintptr_t) cq->buf_a.buf;
 		cmd.db_addr  = (uintptr_t) cq->dbrec;
 		cmd.cqe_size = cqe_sz;
 	}
 
-	if (attr->comp_mask)
+	if (attr->comp_mask || cmd_e.exp_data.comp_mask)
 		ret = ibv_exp_cmd_create_cq(context, ncqe - 1, channel,
 					    comp_vector, &cq->ibv_cq,
 					    &cmd_e.ibv_cmd,
@@ -595,6 +604,7 @@ static struct ibv_cq *create_cq(struct ibv_context *context,
 		ret = ibv_cmd_create_cq(context, ncqe - 1, channel, comp_vector,
 					&cq->ibv_cq, &cmd.ibv_cmd, sizeof cmd,
 					&resp.ibv_resp, sizeof(resp));
+
 	if (ret) {
 		mlx5_dbg(fp, MLX5_DBG_CQ, "ret %d\n", ret);
 		goto err_db;
@@ -603,17 +613,18 @@ static struct ibv_cq *create_cq(struct ibv_context *context,
 	cq->active_buf = &cq->buf_a;
 	cq->resize_buf = NULL;
 	cq->cqn = resp.cqn;
-	cq->stall_enable = to_mctx(context)->stall_enable;
-	cq->stall_adaptive_enable = to_mctx(context)->stall_adaptive_enable;
-	cq->stall_cycles = to_mctx(context)->stall_cycles;
+	cq->stall_enable = mctx->stall_enable;
+	cq->stall_adaptive_enable = mctx->stall_adaptive_enable;
+	cq->stall_cycles = mctx->stall_cycles;
+	cq->cq_log_size = mlx5_ilog2(ncqe);
 
 	return &cq->ibv_cq;
 
 err_db:
-	mlx5_free_db(to_mctx(context), cq->dbrec);
+	mlx5_free_db(mctx, cq->dbrec);
 
 err_buf:
-	mlx5_free_cq_buf(to_mctx(context), &cq->buf_a);
+	mlx5_free_cq_buf(mctx, &cq->buf_a);
 
 err_spl:
 	mlx5_spinlock_destroy(&cq->lock);
@@ -1742,6 +1753,7 @@ static struct ibv_qp *create_qp(struct ibv_context *context,
 		qp->rsc.rsn = drvx->exp.uidx;
 	else
 		qp->rsc.rsn = ibqp->qp_num;
+
 	if (is_exp && (respx.exp.comp_mask & MLX5_EXP_CREATE_QP_RESP_MASK_FLAGS_IDX) &&
 	    (respx.exp.flags & MLX5_EXP_CREATE_QP_RESP_MULTI_PACKET_WQE_FLAG))
 		qp->gen_data.model_flags |= MLX5_QP_MODEL_MULTI_PACKET_WQE;
@@ -1962,13 +1974,19 @@ int mlx5_exp_modify_wq(struct ibv_exp_wq *wq,
 
 	if ((attr->attr_mask & IBV_EXP_WQ_ATTR_STATE) &&
 	    attr->wq_state == IBV_EXP_WQS_RDY) {
-		mlx5_spin_lock(&to_mcq(wq->cq)->lock);
-		__mlx5_cq_clean(to_mcq(wq->cq),
-				rwq->rsc.rsn, wq->srq ? to_msrq(wq->srq) : NULL);
-		mlx5_spin_unlock(&to_mcq(wq->cq)->lock);
-		mlx5_init_rwq_indices(rwq);
-		rwq->db[MLX5_RCV_DBR] = 0;
-		rwq->db[MLX5_SND_DBR] = 0;
+		if ((attr->attr_mask & IBV_EXP_WQ_ATTR_CURR_STATE) &&
+		    attr->curr_wq_state != wq->state)
+			return -EINVAL;
+
+		if (wq->state == IBV_EXP_WQS_RESET) {
+			mlx5_spin_lock(&to_mcq(wq->cq)->lock);
+			__mlx5_cq_clean(to_mcq(wq->cq),
+					rwq->rsc.rsn, wq->srq ? to_msrq(wq->srq) : NULL);
+			mlx5_spin_unlock(&to_mcq(wq->cq)->lock);
+			mlx5_init_rwq_indices(rwq);
+			rwq->db[MLX5_RCV_DBR] = 0;
+			rwq->db[MLX5_SND_DBR] = 0;
+		}
 	}
 
 	memset(&cmd, 0, sizeof(cmd));

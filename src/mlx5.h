@@ -407,6 +407,7 @@ struct mlx5_context {
 	int				numa_id;
 	struct mlx5_info_ctx		cc;
 	uint8_t                         cqe_version;
+	uint16_t			cqe_comp_max_num;
 };
 
 struct mlx5_bitmap {
@@ -485,6 +486,8 @@ struct mlx5_cq {
 	int				stall_adaptive_enable;
 	int				stall_cycles;
 	uint8_t				model_flags; /* use mlx5_cq_model_flags */
+	uint16_t			cqe_comp_max_num;
+	uint8_t				cq_log_size;
 };
 
 struct mlx5_srq {
@@ -588,6 +591,7 @@ struct general_data_hot {
 enum mpw_states {
 	MLX5_MPW_STATE_CLOSED,
 	MLX5_MPW_STATE_OPENED,
+	MLX5_MPW_STATE_OPENED_INL,
 	MLX5_MPW_STATE_OPENING,
 };
 enum {
@@ -598,9 +602,13 @@ struct mpw_data {
 	uint8_t		size;
 	uint8_t		num_sge;
 	uint32_t	len;
+	uint32_t	total_len;
 	uint32_t	flags;
 	uint32_t	scur_post;
-	struct mlx5_wqe_data_seg	*last_dseg;
+	union {
+		struct mlx5_wqe_data_seg	*last_dseg;
+		uint8_t				*inl_data;
+	};
 	uint32_t			*ctrl_update;
 };
 struct general_data_warm {
