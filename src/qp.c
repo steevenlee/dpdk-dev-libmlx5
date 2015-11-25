@@ -2806,6 +2806,8 @@ struct ibv_exp_qp_burst_family *mlx5_get_qp_burst_family(struct mlx5_qp *qp,
 {
 	enum ibv_exp_query_intf_status ret = IBV_EXP_INTF_STAT_OK;
 	struct ibv_exp_qp_burst_family *family = NULL;
+	uint32_t unsupported_f;
+	int mpw;
 
 	if ((qp->verbs_qp.qp.state < IBV_QPS_INIT) || (qp->verbs_qp.qp.state > IBV_QPS_RTS)) {
 			*status = IBV_EXP_INTF_STAT_INVAL_OBJ_STATE;
@@ -2816,27 +2818,29 @@ struct ibv_exp_qp_burst_family *mlx5_get_qp_burst_family(struct mlx5_qp *qp,
 		*status = IBV_EXP_INTF_STAT_INVAL_PARARM;
 		return NULL;
 	}
-	if (params->flags & IBV_EXP_QUERY_INTF_FLAG_ENABLE_CHECKS) {
-		fprintf(stderr, PFX "The flag IBV_EXP_QUERY_INTF_FLAG_ENABLE_CHECKS is not supported\n");
-		*status = IBV_EXP_INTF_STAT_INTF_NOT_SUPPORTED;
+	if (params->flags) {
+		fprintf(stderr, PFX "Global interface flags(0x%x) are not supported for QP family\n", params->flags);
+		*status = IBV_EXP_INTF_STAT_FLAGS_NOT_SUPPORTED;
+
 		return NULL;
 	}
+	unsupported_f = params->family_flags & ~(IBV_EXP_QP_BURST_CREATE_ENABLE_MULTI_PACKET_SEND_WR);
+	if (unsupported_f) {
+		fprintf(stderr, PFX "Family flags(0x%x) are not supported for QP family\n", unsupported_f);
+		*status = IBV_EXP_INTF_STAT_FAMILY_FLAGS_NOT_SUPPORTED;
 
-	/*
-	 * The family flag IBV_EXP_QP_BURST_CREATE_DISABLE_ETH_LOOPBACK is not
-	 * relevant in this case.
-	 */
-
+		return NULL;
+	}
 
 	switch (qp->gen_data_warm.qp_type) {
 	case IBV_QPT_RC:
 	case IBV_QPT_UC:
 	case IBV_QPT_RAW_PACKET:
-		if (qp->gen_data.model_flags & MLX5_QP_MODEL_FLAG_THREAD_SAFE) {
-			int lb = !(params->family_flags & IBV_EXP_QP_BURST_CREATE_DISABLE_ETH_LOOPBACK);
-			int mpw = qp->gen_data.model_flags & MLX5_QP_MODEL_MULTI_PACKET_WQE;
+		mpw = (params->family_flags & IBV_EXP_QP_BURST_CREATE_ENABLE_MULTI_PACKET_SEND_WR) &&
+		      (qp->gen_data.model_flags & MLX5_QP_MODEL_MULTI_PACKET_WQE);
 
-			if (!lb && mpw)
+		if (qp->gen_data.model_flags & MLX5_QP_MODEL_FLAG_THREAD_SAFE) {
+			if (mpw)
 				family = &mlx5_qp_burst_family_mpw_safe;
 			else
 				family = &mlx5_qp_burst_family_safe;
@@ -2845,8 +2849,6 @@ struct ibv_exp_qp_burst_family *mlx5_get_qp_burst_family(struct mlx5_qp *qp,
 				  qp->link_layer == IBV_LINK_LAYER_ETHERNET;
 			int _1sge = qp->rq.max_gs == 1;
 			int db_method = qp->gen_data.bf->db_method;
-			int lb = !(params->family_flags & IBV_EXP_QP_BURST_CREATE_DISABLE_ETH_LOOPBACK);
-			int mpw = !lb && !!(qp->gen_data.model_flags & MLX5_QP_MODEL_MULTI_PACKET_WQE);
 
 			family = &mlx5_qp_burst_family_unsafe_tbl
 					[MLX5_QP_BURST_UNSAFE_TBL_IDX(db_method, eth, _1sge, mpw)];
@@ -2943,9 +2945,16 @@ struct ibv_exp_wq_family *mlx5_get_wq_family(struct mlx5_rwq *rwq,
 	enum ibv_exp_query_intf_status ret = IBV_EXP_INTF_STAT_OK;
 	struct ibv_exp_wq_family *family = NULL;
 
-	if (params->flags & IBV_EXP_QUERY_INTF_FLAG_ENABLE_CHECKS) {
-		fprintf(stderr, PFX "The flag IBV_EXP_QUERY_INTF_FLAG_ENABLE_CHECKS is not supported\n");
-		*status = IBV_EXP_INTF_STAT_INTF_NOT_SUPPORTED;
+	if (params->flags) {
+		fprintf(stderr, PFX "Global interface flags(0x%x) are not supported for WQ family\n", params->flags);
+		*status = IBV_EXP_INTF_STAT_FLAGS_NOT_SUPPORTED;
+
+		return NULL;
+	}
+	if (params->family_flags) {
+		fprintf(stderr, PFX "Family flags(0x%x) are not supported for WQ family\n", params->family_flags);
+		*status = IBV_EXP_INTF_STAT_FAMILY_FLAGS_NOT_SUPPORTED;
+
 		return NULL;
 	}
 
