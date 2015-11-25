@@ -768,6 +768,7 @@ int mlx5_resize_cq(struct ibv_cq *ibcq, int cqe)
 	mlx5_free_cq_buf(mctx, cq->active_buf);
 	cq->active_buf = cq->resize_buf;
 	cq->ibv_cq.cqe = cqe - 1;
+	cq->cq_log_size = mlx5_ilog2(cqe);
 	mlx5_update_cons_index(cq);
 	mlx5_spin_unlock(&cq->lock);
 	cq->resize_buf = NULL;
@@ -2468,15 +2469,21 @@ struct ibv_ah *mlx5_create_ah_common(struct ibv_pd *pd,
 	if (attr->is_global) {
 		wqe->base.dqp_dct = htonl(MLX5_EXTENDED_UD_AV);
 		wqe->grh_sec.tclass = attr->grh.traffic_class;
-		wqe->grh_sec.hop_limit = attr->grh.hop_limit;
+		if ((attr->grh.hop_limit < 2) &&
+		    (link_layer == IBV_LINK_LAYER_ETHERNET) &&
+		    (gid_type != IBV_EXP_IB_ROCE_V1_GID_TYPE))
+			wqe->grh_sec.hop_limit = 0xff;
+		else
+			wqe->grh_sec.hop_limit = attr->grh.hop_limit;
 		tmp = htonl((grh << 30) |
 			    ((attr->grh.sgid_index & 0xff) << 20) |
 			    (attr->grh.flow_label & 0xfffff));
 		wqe->grh_sec.grh_gid_fl = tmp;
 		memcpy(wqe->grh_sec.rgid, attr->grh.dgid.raw, 16);
 		if ((link_layer == IBV_LINK_LAYER_ETHERNET) &&
+		    (gid_type != IBV_EXP_IB_ROCE_V1_GID_TYPE) &&
 		    ipv6_addr_v4mapped((struct in6_addr *)attr->grh.dgid.raw))
-			memset(wqe->grh_sec.rgid + 4, 0, 12);
+			memset(wqe->grh_sec.rgid, 0, 12);
 	} else if (!ctx->compact_av) {
 		wqe->base.dqp_dct = htonl(MLX5_EXTENDED_UD_AV);
 	}
