@@ -496,6 +496,16 @@ static int get_shut_up_bf(struct ibv_context *context)
 	return strcmp(env, "0") ? 1 : 0;
 }
 
+static int get_cqe_comp(struct ibv_context *context)
+{
+	char env[VERBS_MAX_ENV_VAL];
+
+	if (ibv_exp_cmd_getenv(context, "MLX5_ENABLE_CQE_COMPRESSION", env, sizeof(env)))
+		return 0;
+
+	return strcmp(env, "0") ? 1 : 0;
+}
+
 static int get_num_low_lat_uuars(void)
 {
 	return 4;
@@ -715,9 +725,10 @@ static int mlx5_alloc_context(struct verbs_device *vdev,
 	if (resp.exp_data.comp_mask & MLX5_EXP_ALLOC_CTX_RESP_MASK_RROCE_UDP_SPORT_MAX)
 		context->rroce_udp_sport_max = resp.exp_data.rroce_udp_sport_max;
 
+	ctx->ops = mlx5_ctx_ops;
 	if (context->cqe_version) {
 		if (context->cqe_version == 1) {
-			mlx5_ctx_ops.poll_cq = mlx5_poll_cq_1;
+			ctx->ops.poll_cq = mlx5_poll_cq_1;
 		} else {
 			printf("Unsupported cqe_vesion = %d, stay on  cqe version 0\n",
 			       context->cqe_version);
@@ -748,6 +759,7 @@ static int mlx5_alloc_context(struct verbs_device *vdev,
 
 	context->prefer_bf = get_always_bf(&context->ibv_ctx);
 	context->shut_up_bf = get_shut_up_bf(&context->ibv_ctx);
+	context->enable_cqe_comp = get_cqe_comp(&context->ibv_ctx);
 
 	offset = 0;
 	set_command(MLX5_MMAP_MAP_DC_INFO_PAGE, &offset);
@@ -821,7 +833,6 @@ static int mlx5_alloc_context(struct verbs_device *vdev,
 
 	pthread_mutex_init(&context->task_mutex, NULL);
 
-	ctx->ops = mlx5_ctx_ops;
 	set_extended(verbs_ctx);
 	set_experimental(ctx);
 
