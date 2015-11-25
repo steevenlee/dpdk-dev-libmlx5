@@ -124,6 +124,7 @@
 
 #define PFX		"mlx5: "
 
+#define MLX5_MAX_PORTS_NUM	2
 
 enum {
 	MLX5_IB_MMAP_CMD_SHIFT	= 8,
@@ -408,6 +409,13 @@ struct mlx5_context {
 	struct mlx5_info_ctx		cc;
 	uint8_t                         cqe_version;
 	uint16_t			cqe_comp_max_num;
+	uint16_t			rroce_udp_sport_min;
+	uint16_t			rroce_udp_sport_max;
+	struct {
+		uint8_t			valid;
+		uint8_t			link_layer;
+		enum ibv_port_cap_flags	caps;
+	} port_query_cache[MLX5_MAX_PORTS_NUM];
 };
 
 struct mlx5_bitmap {
@@ -879,6 +887,8 @@ int mlx5_query_device(struct ibv_context *context,
 		       struct ibv_device_attr *attr);
 int mlx5_query_port(struct ibv_context *context, uint8_t port,
 		     struct ibv_port_attr *attr);
+int mlx5_exp_query_port(struct ibv_context *context, uint8_t port_num,
+			struct ibv_exp_port_attr *port_attr);
 
 struct ibv_pd *mlx5_alloc_pd(struct ibv_context *context);
 int mlx5_free_pd(struct ibv_pd *pd);
@@ -983,6 +993,8 @@ struct ibv_qp *mlx5_drv_create_qp(struct ibv_context *context,
 				  struct ibv_qp_init_attr_ex *attrx);
 struct ibv_qp *mlx5_exp_create_qp(struct ibv_context *context,
 				  struct ibv_exp_qp_init_attr *attrx);
+struct ibv_ah *mlx5_exp_create_ah(struct ibv_pd *pd,
+				  struct ibv_exp_ah_attr *attr_ex);
 struct ibv_xrcd	*mlx5_open_xrcd(struct ibv_context *context,
 				struct ibv_xrcd_init_attr *xrcd_init_attr);
 struct ibv_srq *mlx5_create_srq_ex(struct ibv_context *context,

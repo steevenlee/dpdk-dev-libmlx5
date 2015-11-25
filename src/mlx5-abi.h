@@ -84,6 +84,8 @@ struct mlx5_alloc_ucontext_resp {
 enum mlx5_exp_alloc_context_resp_mask {
 	MLX5_EXP_ALLOC_CTX_RESP_MASK_CQE_COMP_MAX_NUM		= 1 << 0,
 	MLX5_EXP_ALLOC_CTX_RESP_MASK_CQE_VERSION		= 1 << 1,
+	MLX5_EXP_ALLOC_CTX_RESP_MASK_RROCE_UDP_SPORT_MIN	= 1 << 2,
+	MLX5_EXP_ALLOC_CTX_RESP_MASK_RROCE_UDP_SPORT_MAX	= 1 << 3,
 };
 
 struct mlx5_exp_alloc_ucontext_data_resp {
@@ -91,6 +93,9 @@ struct mlx5_exp_alloc_ucontext_data_resp {
 	__u16   cqe_comp_max_num;
 	__u8    cqe_version;
 	__u8    reserved;
+	__u16	rroce_udp_sport_min;
+	__u16	rroce_udp_sport_max;
+	__u32	reserved1;
 };
 
 struct mlx5_exp_alloc_ucontext_resp {
