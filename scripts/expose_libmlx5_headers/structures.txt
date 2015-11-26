@@ -24,6 +24,7 @@ mlx5_wqe_wait_en_seg
 mlx5_err_cqe
 mlx5_cqe64
 mlx5_spinlock
+mlx5_lock
 mlx5_numa_req
 mlx5_buf
 general_data_hot

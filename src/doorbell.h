@@ -44,19 +44,23 @@
 #  error __BYTE_ORDER not defined
 #endif
 
-static inline void mlx5_write64(uint32_t val[2], void *dest, struct mlx5_spinlock *lock)
+static inline void mlx5_write64(uint32_t val[2],
+				void *dest,
+				struct mlx5_lock *lock)
 {
 	*(volatile uint64_t *)dest = MLX5_PAIR_TO_64(val);
 }
 
 #else
 
-static inline void mlx5_write64(uint32_t val[2], void *dest, struct mlx5_spinlock *lock)
+static inline void mlx5_write64(uint32_t val[2],
+				void *dest,
+				struct mlx5_lock *lock)
 {
-	mlx5_spin_lock(lock);
+	mlx5_lock(lock);
 	*(volatile uint32_t *)dest		= val[0];
 	*(volatile uint32_t *)(dest + 4)	= val[1];
-	mlx5_spin_unlock(lock);
+	mlx5_unlock(lock);
 }
 
 #endif

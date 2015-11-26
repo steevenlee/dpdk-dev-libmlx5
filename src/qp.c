@@ -277,9 +277,9 @@ static int __mlx5_wq_overflow(struct mlx5_wq *wq, int nreq, struct mlx5_qp *qp)
 	unsigned cur;
 
 
-	mlx5_spin_lock(&cq->lock);
+	mlx5_lock(&cq->lock);
 	cur = wq->head - wq->tail;
-	mlx5_spin_unlock(&cq->lock);
+	mlx5_unlock(&cq->lock);
 
 	return cur + nreq >= wq->max_post;
 }
@@ -1708,7 +1708,7 @@ static inline int __ring_db(struct mlx5_qp *qp, const int db_method, uint32_t cu
 
 		/* This wc_wmb ensures ordering between DB record and BF copy */
 		wc_wmb();
-		pthread_spin_lock(&bf->lock.lock);
+		mlx5_lock(&bf->lock);
 		if (size <= bf->buf_size / 64)
 			mlx5_bf_copy(bf->reg + bf->offset, seg,
 				     size * 64, qp);
@@ -1725,7 +1725,7 @@ static inline int __ring_db(struct mlx5_qp *qp, const int db_method, uint32_t cu
 		 */
 		wc_wmb();
 		bf->offset ^= bf->buf_size;
-		pthread_spin_unlock(&bf->lock.lock);
+		mlx5_unlock(&bf->lock);
 		break;
 
 	case MLX5_DB_METHOD_DB:
@@ -1764,7 +1764,7 @@ static inline int __mlx5_post_send(struct ibv_qp *ibqp, struct ibv_exp_send_wr *
 #endif
 
 
-	mlx5_spin_lock(&qp->sq.lock);
+	mlx5_lock(&qp->sq.lock);
 
 	for (nreq = 0; wr; ++nreq, wr = wr->next) {
 		idx = qp->gen_data.scur_post & (qp->sq.wqe_cnt - 1);
@@ -1826,7 +1826,7 @@ out:
 
 post_send_no_db:
 
-	mlx5_spin_unlock(&qp->sq.lock);
+	mlx5_unlock(&qp->sq.lock);
 
 	return err;
 }
@@ -1871,7 +1871,7 @@ int mlx5_post_recv(struct ibv_qp *ibqp, struct ibv_recv_wr *wr,
 	FILE *fp = to_mctx(ibqp->context)->dbg_fp;
 #endif
 
-	mlx5_spin_lock(&qp->rq.lock);
+	mlx5_lock(&qp->rq.lock);
 
 	ind = qp->rq.head & (qp->rq.wqe_cnt - 1);
 
@@ -1941,7 +1941,7 @@ out:
 			qp->gen_data.db[MLX5_RCV_DBR] = htonl(qp->rq.head & 0xffff);
 	}
 
-	mlx5_spin_unlock(&qp->rq.lock);
+	mlx5_unlock(&qp->rq.lock);
 
 	return err;
 }
@@ -2084,7 +2084,7 @@ static inline int send_pending(struct ibv_qp *ibqp, uint64_t addr,
 	int i;
 
 	if (thread_safe)
-		pthread_spin_lock(&qp->sq.lock.lock);
+		mlx5_lock(&qp->sq.lock);
 
 	if (use_mpw) {
 		uint32_t msg_size, n_sg;
@@ -2318,7 +2318,7 @@ static inline int send_pending(struct ibv_qp *ibqp, uint64_t addr,
 	}
 
 	if (thread_safe)
-		pthread_spin_unlock(&qp->sq.lock.lock);
+		mlx5_unlock(&qp->sq.lock);
 
 	return 0;
 }
@@ -2498,7 +2498,7 @@ static inline int send_msg_list(struct ibv_qp *ibqp, struct ibv_sge *sg_list, ui
 	int i;
 
 	if (thread_safe)
-		pthread_spin_lock(&qp->sq.lock.lock);
+		mlx5_lock(&qp->sq.lock);
 
 	for (i = 0; i < num; i++, sg_list++)
 			/*   qp,   addr,          length,          lkey,	*/
@@ -2512,7 +2512,7 @@ static inline int send_msg_list(struct ibv_qp *ibqp, struct ibv_sge *sg_list, ui
 	send_flush_unsafe(ibqp, db_method);
 
 	if (thread_safe)
-		pthread_spin_unlock(&qp->sq.lock.lock);
+		mlx5_unlock(&qp->sq.lock);
 
 	return 0;
 }
@@ -2582,9 +2582,9 @@ static int mlx5_send_flush_safe(struct ibv_qp *ibqp)
 {
 	struct mlx5_qp *qp = to_mqp(ibqp);
 
-	pthread_spin_lock(&qp->sq.lock.lock);
+	mlx5_lock(&qp->sq.lock);
 	send_flush_unsafe(ibqp, qp->gen_data.bf->db_method);
-	pthread_spin_unlock(&qp->sq.lock.lock);
+	mlx5_unlock(&qp->sq.lock);
 
 	return 0;
 }
@@ -2615,7 +2615,7 @@ static inline int recv_sg_list(struct mlx5_wq *rq, struct ibv_sge *sg_list, uint
 	int i, j;
 
 	if (thread_safe)
-		pthread_spin_lock(&rq->lock.lock);
+		mlx5_lock(&rq->lock);
 
 	ind = rq->head & (rq->wqe_cnt - 1);
 	scat = get_recv_wqe(rq, ind);
@@ -2645,7 +2645,7 @@ static inline int recv_sg_list(struct mlx5_wq *rq, struct ibv_sge *sg_list, uint
 	*rq->db = htonl(rq->head & 0xffff);
 
 	if (thread_safe)
-		pthread_spin_unlock(&rq->lock.lock);
+		mlx5_unlock(&rq->lock);
 
 	return 0;
 }
@@ -2661,7 +2661,7 @@ static inline int recv_burst(struct mlx5_wq *rq, struct ibv_sge *sg_list, uint32
 	int i;
 
 	if (thread_safe)
-		pthread_spin_lock(&rq->lock.lock);
+		mlx5_lock(&rq->lock);
 
 	ind = rq->head & (rq->wqe_cnt - 1);
 	for (i = 0; i < num; ++i) {
@@ -2690,7 +2690,7 @@ static inline int recv_burst(struct mlx5_wq *rq, struct ibv_sge *sg_list, uint32
 	*rq->db = htonl(rq->head & 0xffff);
 
 	if (thread_safe)
-		pthread_spin_unlock(&rq->lock.lock);
+		mlx5_unlock(&rq->lock);
 
 	return 0;
 }

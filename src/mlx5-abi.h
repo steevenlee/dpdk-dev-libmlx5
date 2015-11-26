@@ -86,6 +86,7 @@ enum mlx5_exp_alloc_context_resp_mask {
 	MLX5_EXP_ALLOC_CTX_RESP_MASK_CQE_VERSION		= 1 << 1,
 	MLX5_EXP_ALLOC_CTX_RESP_MASK_RROCE_UDP_SPORT_MIN	= 1 << 2,
 	MLX5_EXP_ALLOC_CTX_RESP_MASK_RROCE_UDP_SPORT_MAX	= 1 << 3,
+	MLX5_EXP_ALLOC_CTX_RESP_MASK_HCA_CORE_CLOCK_OFFSET	= 1 << 4,
 };
 
 struct mlx5_exp_alloc_ucontext_data_resp {
@@ -95,7 +96,7 @@ struct mlx5_exp_alloc_ucontext_data_resp {
 	__u8    reserved;
 	__u16	rroce_udp_sport_min;
 	__u16	rroce_udp_sport_max;
-	__u32	reserved1;
+	__u32	hca_core_clock_offset;
 };
 
 struct mlx5_exp_alloc_ucontext_resp {

@@ -137,10 +137,15 @@ enum {
 	MLX5_WQ_PATTERN = 0x89AB0123
 };
 
-enum mlx5_spinlock_state {
-	MLX5_SL_USE_SPIN_LOCK,
-	MLX5_SL_LOCKED,
-	MLX5_SL_UNLOCKED
+enum mlx5_lock_type {
+	MLX5_SPIN_LOCK = 0,
+	MLX5_MUTEX = 1,
+};
+
+enum mlx5_lock_state {
+	MLX5_USE_LOCK,
+	MLX5_LOCKED,
+	MLX5_UNLOCKED
 };
 
 enum {
@@ -151,6 +156,7 @@ enum {
 	MLX5_MMAP_MAP_DC_INFO_PAGE	   = 4,
 
 	/* Use EXP mmap commands until it is pushed to upstream */
+	MLX5_EXP_MMAP_GET_CORE_CLOCK_CMD		= 0xFB,
 	MLX5_EXP_MMAP_GET_CONTIGUOUS_PAGES_CPU_NUMA_CMD = 0xFC,
 	MLX5_EXP_MMAP_GET_CONTIGUOUS_PAGES_DEV_NUMA_CMD = 0xFD,
 	MLX5_EXP_IB_MMAP_N_ALLOC_WC_CMD			= 0xFE,
@@ -313,9 +319,16 @@ struct mlx5_resource {
 
 struct mlx5_db_page;
 
+struct mlx5_lock {
+	pthread_mutex_t                 mutex;
+	pthread_spinlock_t              slock;
+	enum mlx5_lock_state            state;
+	enum mlx5_lock_type             type;
+};
+
 struct mlx5_spinlock {
 	pthread_spinlock_t		lock;
-	enum mlx5_spinlock_state	state;
+	enum mlx5_lock_state		state;
 };
 
 struct mlx5_atomic_info {
@@ -379,7 +392,7 @@ struct mlx5_context {
 	unsigned int			num_wc_uars;
 	int				max_ctx_res_domain;
 
-	struct mlx5_spinlock		lock32;
+	struct mlx5_lock		lock32;
 	struct mlx5_db_page	       *db_list;
 	pthread_mutex_t			db_list_mutex;
 	int				cache_line_size;
@@ -417,6 +430,13 @@ struct mlx5_context {
 		uint8_t			link_layer;
 		enum ibv_port_cap_flags	caps;
 	} port_query_cache[MLX5_MAX_PORTS_NUM];
+	struct {
+		uint64_t                offset;
+		uint64_t                mask;
+		uint32_t		mult;
+		uint8_t			shift;
+	} core_clock;
+	void			       *hca_core_clock;
 };
 
 struct mlx5_bitmap {
@@ -471,8 +491,14 @@ enum mlx5_cq_model_flags {
 	MLX5_CQ_MODEL_FLAG_THREAD_SAFE = 1 << 0,
 };
 
+enum mlx5_cq_creation_flags {
+	/* When set, CQ supports timestamping */
+	MLX5_CQ_CREATION_FLAG_COMPLETION_TIMESTAMP = 1 << 0,
+};
+
 struct mlx5_cq {
 	struct ibv_cq			ibv_cq;
+	uint32_t			creation_flags;
 	uint32_t			pattern;
 	struct mlx5_buf			buf_a;
 	struct mlx5_buf			buf_b;
@@ -480,7 +506,7 @@ struct mlx5_cq {
 	struct mlx5_buf		       *resize_buf;
 	int				resize_cqes;
 	int				active_cqes;
-	struct mlx5_spinlock		lock;
+	struct mlx5_lock		lock;
 	uint32_t			cqn;
 	uint32_t			cons_index;
 	uint32_t                        wait_index;
@@ -531,7 +557,7 @@ struct mlx5_wq {
 	unsigned			tail;
 	unsigned			max_post;
 	int				max_gs;
-	struct mlx5_spinlock		lock;
+	struct mlx5_lock		lock;
 	/* post_recv hot data */
 	void			       *buff;
 	uint32_t		       *db;
@@ -554,7 +580,11 @@ enum mlx5_db_method {
 struct mlx5_bf {
 	void			       *reg;
 	int				need_lock;
-	struct mlx5_spinlock		lock;
+	/*
+	 * Protect usage of BF address field including data written to the BF
+	 * and the BF buffer toggling.
+	 */
+	struct mlx5_lock		lock;
 	unsigned			offset;
 	unsigned			buf_size;
 	unsigned			uuarn;
@@ -765,6 +795,7 @@ extern int mlx5_stall_cq_poll_max;
 extern int mlx5_stall_cq_inc_step;
 extern int mlx5_stall_cq_dec_step;
 extern int mlx5_single_threaded;
+extern int mlx5_use_mutex;
 
 static inline unsigned DIV_ROUND_UP(unsigned n, unsigned d)
 {
@@ -858,6 +889,13 @@ static inline struct mlx5_klm_buf *to_klm(struct ibv_exp_mkey_list_container  *i
 static inline int max_int(int a, int b)
 {
 	return a > b ? a : b;
+}
+
+static inline enum mlx5_lock_type mlx5_get_locktype(void)
+{
+	if (!mlx5_use_mutex)
+		return MLX5_SPIN_LOCK;
+	return MLX5_MUTEX;
 }
 
 void *mlx5_uar_mmap(int idx, int cmd, int page_size, int cmd_fd);
@@ -1011,6 +1049,8 @@ void *mlx5_get_legacy_xrc(struct ibv_srq *srq);
 void mlx5_set_legacy_xrc(struct ibv_srq *srq, void *legacy_xrc_srq);
 int mlx5_query_device_ex(struct ibv_context *context,
 			 struct ibv_exp_device_attr *attr);
+int mlx5_exp_query_values(struct ibv_context *context, int q_values,
+			  struct ibv_exp_values *values);
 int mlx5_modify_cq(struct ibv_cq *cq, struct ibv_exp_cq_attr *attr, int attr_mask);
 struct ibv_exp_dct *mlx5_create_dct(struct ibv_context *context,
 				    struct ibv_exp_dct_init_attr *attr);
@@ -1054,16 +1094,16 @@ static inline void *mlx5_find_uidx(struct mlx5_context *ctx, uint32_t uidx)
 
 static inline int mlx5_spin_lock(struct mlx5_spinlock *lock)
 {
-	if (lock->state == MLX5_SL_USE_SPIN_LOCK)
+	if (lock->state == MLX5_USE_LOCK)
 		return pthread_spin_lock(&lock->lock);
 
-	if (unlikely(lock->state == MLX5_SL_LOCKED)) {
+	if (unlikely(lock->state == MLX5_LOCKED)) {
 		fprintf(stderr, "*** ERROR: multithreading violation ***\n"
 			"You are running a multithreaded application but\n"
 			"you set MLX5_SINGLE_THREADED=1. Please unset it.\n");
 		abort();
 	} else {
-		lock->state = MLX5_SL_LOCKED;
+		lock->state = MLX5_LOCKED;
 		wmb();
 	}
 
@@ -1072,10 +1112,10 @@ static inline int mlx5_spin_lock(struct mlx5_spinlock *lock)
 
 static inline int mlx5_spin_unlock(struct mlx5_spinlock *lock)
 {
-	if (lock->state == MLX5_SL_USE_SPIN_LOCK)
+	if (lock->state == MLX5_USE_LOCK)
 		return pthread_spin_unlock(&lock->lock);
 
-	lock->state = MLX5_SL_UNLOCKED;
+	lock->state = MLX5_UNLOCKED;
 
 	return 0;
 }
@@ -1083,19 +1123,86 @@ static inline int mlx5_spin_unlock(struct mlx5_spinlock *lock)
 static inline int mlx5_spinlock_init(struct mlx5_spinlock *lock, int use_spinlock)
 {
 	if (use_spinlock) {
-		lock->state = MLX5_SL_USE_SPIN_LOCK;
+		lock->state = MLX5_USE_LOCK;
 		return pthread_spin_init(&lock->lock, PTHREAD_PROCESS_PRIVATE);
 	}
-	lock->state = MLX5_SL_UNLOCKED;
+	lock->state = MLX5_UNLOCKED;
 
 	return 0;
 }
 
 static inline int mlx5_spinlock_destroy(struct mlx5_spinlock *lock)
 {
-	if (lock->state == MLX5_SL_USE_SPIN_LOCK)
+	if (lock->state == MLX5_USE_LOCK)
 		return pthread_spin_destroy(&lock->lock);
 
+	return 0;
+}
+
+static inline int mlx5_lock(struct mlx5_lock *lock)
+{
+	if (lock->state == MLX5_USE_LOCK) {
+		if (lock->type == MLX5_SPIN_LOCK)
+			return pthread_spin_lock(&lock->slock);
+
+		return pthread_mutex_lock(&lock->mutex);
+	}
+
+	if (unlikely(lock->state == MLX5_LOCKED)) {
+		fprintf(stderr, "*** ERROR: multithreading violation ***\n"
+			"You are running a multithreaded application but\n"
+			"you set MLX5_SINGLE_THREADED=1. Please unset it.\n");
+		abort();
+	} else {
+		lock->state = MLX5_LOCKED;
+		/* Make new lock state visible to other threads */
+		wmb();
+	}
+
+	return 0;
+}
+
+static inline int mlx5_unlock(struct mlx5_lock *lock)
+{
+	if (lock->state == MLX5_USE_LOCK) {
+		if (lock->type == MLX5_SPIN_LOCK)
+			return pthread_spin_unlock(&lock->slock);
+
+		return pthread_mutex_unlock(&lock->mutex);
+	}
+
+	lock->state = MLX5_UNLOCKED;
+
+	return 0;
+}
+
+static inline int mlx5_lock_init(struct mlx5_lock *lock,
+				 int use_lock,
+				 enum mlx5_lock_type lock_type)
+{
+	if (use_lock) {
+		lock->type = lock_type;
+		lock->state = MLX5_USE_LOCK;
+		if (lock->type == MLX5_SPIN_LOCK)
+			return pthread_spin_init(&lock->slock,
+						 PTHREAD_PROCESS_PRIVATE);
+		return pthread_mutex_init(&lock->mutex,
+					  PTHREAD_PROCESS_PRIVATE);
+	}
+
+	lock->state = MLX5_UNLOCKED;
+
+	return 0;
+}
+
+static inline int mlx5_lock_destroy(struct mlx5_lock *lock)
+{
+	if (lock->state == MLX5_USE_LOCK) {
+		if (lock->type == MLX5_SPIN_LOCK)
+			return pthread_spin_destroy(&lock->slock);
+
+		return pthread_mutex_destroy(&lock->mutex);
+	}
 	return 0;
 }
 
