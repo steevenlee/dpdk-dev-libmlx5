@@ -81,7 +81,8 @@ cat <<EOF >> $output_file
 enum mlx5_alloc_type { MXM_MLX5_ALLOC_TYPE_DUMMY };
 enum mlx5_rsc_type   { MXM_MLX5_RSC_TYPE_DUMMY };
 enum mlx5_db_method { MXM_MLX5_DB_TYPE_DUMMY };
-enum mlx5_spinlock_state { MXM_MLX5_SPINLOCK_STATE_TYPE_DUMMY };
+enum mlx5_lock_type { MXM_MLX5_LOCK_TYPE_DUMMY };
+enum mlx5_lock_state { MXM_MLX5_LOCK_STATE_TYPE_DUMMY };
 EOF
 	echo "enum {" >> $output_file
 	while read -r line

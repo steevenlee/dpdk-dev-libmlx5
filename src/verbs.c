@@ -52,6 +52,7 @@
 #include "wqe.h"
 
 int mlx5_single_threaded = 0;
+int mlx5_use_mutex;
 
 static void __mlx5_query_device(uint64_t raw_fw_ver,
 				struct ibv_device_attr *attr)
@@ -546,6 +547,11 @@ static int qp_sig_enabled(struct ibv_context *context)
 	return 0;
 }
 
+enum {
+	EXP_CREATE_CQ_SUPPORTED_FLAGS = IBV_EXP_CQ_CREATE_CROSS_CHANNEL |
+					IBV_EXP_CQ_TIMESTAMP
+};
+
 static struct ibv_cq *create_cq(struct ibv_context *context,
 				int cqe,
 				struct ibv_comp_channel *channel,
@@ -593,7 +599,7 @@ static struct ibv_cq *create_cq(struct ibv_context *context,
 		}
 		thread_safe = (to_mres_domain(attr->res_domain)->attr.thread_model == IBV_EXP_THREAD_SAFE);
 	}
-	if (mlx5_spinlock_init(&cq->lock, thread_safe))
+	if (mlx5_lock_init(&cq->lock, thread_safe, mlx5_get_locktype()))
 		goto err;
 
 	cq->model_flags = thread_safe ? MLX5_CQ_MODEL_FLAG_THREAD_SAFE : 0;
@@ -636,6 +642,14 @@ static struct ibv_cq *create_cq(struct ibv_context *context,
 	cq->cqe_sz			= cqe_sz;
 
 	if (attr->comp_mask || mctx->cqe_comp_max_num) {
+		if (attr->comp_mask & IBV_EXP_CQ_INIT_ATTR_FLAGS &&
+		    attr->flags & ~EXP_CREATE_CQ_SUPPORTED_FLAGS) {
+			mlx5_dbg(fp, MLX5_DBG_CQ,
+				 "Unsupported creation flags requested\n");
+			errno = EINVAL;
+			goto err_db;
+		}
+
 		cmd_e.buf_addr = (uintptr_t) cq->buf_a.buf;
 		cmd_e.db_addr  = (uintptr_t) cq->dbrec;
 		cmd_e.cqe_size = cqe_sz;
@@ -671,6 +685,11 @@ static struct ibv_cq *create_cq(struct ibv_context *context,
 		goto err_db;
 	}
 
+	if (attr->comp_mask & IBV_EXP_CQ_INIT_ATTR_FLAGS &&
+	    attr->flags & IBV_EXP_CQ_TIMESTAMP)
+		cq->creation_flags |=
+			MLX5_CQ_CREATION_FLAG_COMPLETION_TIMESTAMP;
+
 	cq->active_buf = &cq->buf_a;
 	cq->resize_buf = NULL;
 	cq->cqn = resp.cqn;
@@ -688,7 +707,7 @@ err_buf:
 	mlx5_free_cq_buf(mctx, &cq->buf_a);
 
 err_spl:
-	mlx5_spinlock_destroy(&cq->lock);
+	mlx5_lock_destroy(&cq->lock);
 
 err:
 	free(cq);
@@ -735,7 +754,7 @@ int mlx5_resize_cq(struct ibv_cq *ibcq, int cqe)
 	if (((long long)cqe * 64) > INT_MAX)
 		return EINVAL;
 
-	mlx5_spin_lock(&cq->lock);
+	mlx5_lock(&cq->lock);
 	cq->active_cqes = cq->ibv_cq.cqe;
 	if (cq->active_buf == &cq->buf_a)
 		cq->resize_buf = &cq->buf_b;
@@ -773,7 +792,7 @@ int mlx5_resize_cq(struct ibv_cq *ibcq, int cqe)
 	cq->ibv_cq.cqe = cqe - 1;
 	cq->cq_log_size = mlx5_ilog2(cqe);
 	mlx5_update_cons_index(cq);
-	mlx5_spin_unlock(&cq->lock);
+	mlx5_unlock(&cq->lock);
 	cq->resize_buf = NULL;
 	return 0;
 
@@ -782,7 +801,7 @@ out_buf:
 	cq->resize_buf = NULL;
 
 out:
-	mlx5_spin_unlock(&cq->lock);
+	mlx5_unlock(&cq->lock);
 	return err;
 }
 
@@ -1735,8 +1754,8 @@ static struct ibv_qp *create_qp(struct ibv_context *context,
 		}
 		thread_safe = (res_domain->attr.thread_model == IBV_EXP_THREAD_SAFE);
 	}
-	if (mlx5_spinlock_init(&qp->sq.lock, thread_safe) ||
-	    mlx5_spinlock_init(&qp->rq.lock, thread_safe))
+	if (mlx5_lock_init(&qp->sq.lock, thread_safe, mlx5_get_locktype()) ||
+	    mlx5_lock_init(&qp->rq.lock, thread_safe, mlx5_get_locktype()))
 		goto err_free_qp_buf;
 	qp->gen_data.model_flags = thread_safe ? MLX5_QP_MODEL_FLAG_THREAD_SAFE : 0;
 
@@ -1989,7 +2008,7 @@ struct ibv_exp_wq *mlx5_exp_create_wq(struct ibv_context *context,
 		thread_safe = (to_mres_domain(attr->res_domain)->attr.thread_model == IBV_EXP_THREAD_SAFE);
 
 	rwq->model_flags = thread_safe ? MLX5_WQ_MODEL_FLAG_THREAD_SAFE : 0;
-	if (mlx5_spinlock_init(&rwq->rq.lock, thread_safe))
+	if (mlx5_lock_init(&rwq->rq.lock, thread_safe, mlx5_get_locktype()))
 		goto err_free_rwq_buf;
 
 	rwq->db = mlx5_alloc_dbrec(ctx);
@@ -2050,10 +2069,10 @@ int mlx5_exp_modify_wq(struct ibv_exp_wq *wq,
 			return -EINVAL;
 
 		if (wq->state == IBV_EXP_WQS_RESET) {
-			mlx5_spin_lock(&to_mcq(wq->cq)->lock);
+			mlx5_lock(&to_mcq(wq->cq)->lock);
 			__mlx5_cq_clean(to_mcq(wq->cq),
 					rwq->rsc.rsn, wq->srq ? to_msrq(wq->srq) : NULL);
-			mlx5_spin_unlock(&to_mcq(wq->cq)->lock);
+			mlx5_unlock(&to_mcq(wq->cq)->lock);
 			mlx5_init_rwq_indices(rwq);
 			rwq->db[MLX5_RCV_DBR] = 0;
 			rwq->db[MLX5_SND_DBR] = 0;
@@ -2076,10 +2095,10 @@ int mlx5_exp_destroy_wq(struct ibv_exp_wq *wq)
 		return ret;
 	}
 
-	mlx5_spin_lock(&to_mcq(wq->cq)->lock);
+	mlx5_lock(&to_mcq(wq->cq)->lock);
 	__mlx5_cq_clean(to_mcq(wq->cq), rwq->rsc.rsn,
 			wq->srq ? to_msrq(wq->srq) : NULL);
-	mlx5_spin_unlock(&to_mcq(wq->cq)->lock);
+	mlx5_unlock(&to_mcq(wq->cq)->lock);
 
 	mlx5_clear_uidx(to_mctx(wq->context), rwq->rsc.rsn);
 	mlx5_free_db(to_mctx(wq->context), rwq->db);
@@ -2252,18 +2271,18 @@ static void mlx5_lock_cqs(struct ibv_qp *qp)
 
 	if (send_cq && recv_cq) {
 		if (send_cq == recv_cq) {
-			mlx5_spin_lock(&send_cq->lock);
+			mlx5_lock(&send_cq->lock);
 		} else if (send_cq->cqn < recv_cq->cqn) {
-			mlx5_spin_lock(&send_cq->lock);
-			mlx5_spin_lock(&recv_cq->lock);
+			mlx5_lock(&send_cq->lock);
+			mlx5_lock(&recv_cq->lock);
 		} else {
-			mlx5_spin_lock(&recv_cq->lock);
-			mlx5_spin_lock(&send_cq->lock);
+			mlx5_lock(&recv_cq->lock);
+			mlx5_lock(&send_cq->lock);
 		}
 	} else if (send_cq) {
-		mlx5_spin_lock(&send_cq->lock);
+		mlx5_lock(&send_cq->lock);
 	} else if (recv_cq) {
-		mlx5_spin_lock(&recv_cq->lock);
+		mlx5_lock(&recv_cq->lock);
 	}
 }
 
@@ -2274,18 +2293,18 @@ static void mlx5_unlock_cqs(struct ibv_qp *qp)
 
 	if (send_cq && recv_cq) {
 		if (send_cq == recv_cq) {
-			mlx5_spin_unlock(&send_cq->lock);
+			mlx5_unlock(&send_cq->lock);
 		} else if (send_cq->cqn < recv_cq->cqn) {
-			mlx5_spin_unlock(&recv_cq->lock);
-			mlx5_spin_unlock(&send_cq->lock);
+			mlx5_unlock(&recv_cq->lock);
+			mlx5_unlock(&send_cq->lock);
 		} else {
-			mlx5_spin_unlock(&send_cq->lock);
-			mlx5_spin_unlock(&recv_cq->lock);
+			mlx5_unlock(&send_cq->lock);
+			mlx5_unlock(&recv_cq->lock);
 		}
 	} else if (send_cq) {
-		mlx5_spin_unlock(&send_cq->lock);
+		mlx5_unlock(&send_cq->lock);
 	} else if (recv_cq) {
-		mlx5_spin_unlock(&recv_cq->lock);
+		mlx5_unlock(&recv_cq->lock);
 	}
 }
 
@@ -2403,9 +2422,9 @@ int mlx5_modify_qp(struct ibv_qp *qp, struct ibv_qp_attr *attr,
 	    (attr_mask & IBV_QP_STATE) &&
 	    attr->qp_state == IBV_QPS_RTR &&
 	    qp->qp_type == IBV_QPT_RAW_ETH) {
-		mlx5_spin_lock(&mqp->rq.lock);
+		mlx5_lock(&mqp->rq.lock);
 		mqp->gen_data.db[MLX5_RCV_DBR] = htonl(mqp->rq.head & 0xffff);
-		mlx5_spin_unlock(&mqp->rq.lock);
+		mlx5_unlock(&mqp->rq.lock);
 	}
 
 
@@ -2852,9 +2871,9 @@ int mlx5_modify_qp_ex(struct ibv_qp *qp, struct ibv_exp_qp_attr *attr,
 	    (attr_mask & IBV_QP_STATE) &&
 	    attr->qp_state == IBV_QPS_RTR &&
 	    qp->qp_type == IBV_QPT_RAW_ETH) {
-		mlx5_spin_lock(&mqp->rq.lock);
+		mlx5_lock(&mqp->rq.lock);
 		mqp->gen_data.db[MLX5_RCV_DBR] = htonl(mqp->rq.head & 0xffff);
-		mlx5_spin_unlock(&mqp->rq.lock);
+		mlx5_unlock(&mqp->rq.lock);
 	}
 
 	return ret;
@@ -3110,7 +3129,11 @@ static struct mlx5_send_db_data *allocate_send_db(struct mlx5_context *ctx)
 			wc_uar->send_db_data[j].bf.db_method = (mlx5_single_threaded && wc_auto_evict_size() == 64) ?
 								MLX5_DB_METHOD_DEDIC_BF_1_THREAD : MLX5_DB_METHOD_DEDIC_BF;
 			wc_uar->send_db_data[j].bf.offset = 0;
-			mlx5_spinlock_init(&wc_uar->send_db_data[j].bf.lock, 0);
+
+			mlx5_lock_init(&wc_uar->send_db_data[j].bf.lock,
+				       0,
+				       mlx5_get_locktype());
+
 			wc_uar->send_db_data[j].bf.need_lock = mlx5_single_threaded ? 0 : 1;
 			/* Indicate that this BF UUAR is not from the static
 			 * UUAR infrastructure
@@ -3307,3 +3330,60 @@ int mlx5_exp_release_intf(struct ibv_context *context, void *intf,
 {
 	return 0;
 }
+
+#define READL(ptr) (*((uint32_t *)(ptr)))
+static int mlx5_read_clock(struct ibv_context *context, uint64_t *cycles)
+{
+	uint32_t clockhi, clocklo, clockhi1;
+	int i;
+	struct mlx5_context *ctx = to_mctx(context);
+
+	if (!ctx->hca_core_clock)
+		return -EOPNOTSUPP;
+
+	/* Handle wraparound */
+	for (i = 0; i < 2; i++) {
+		clockhi = ntohl(READL(ctx->hca_core_clock));
+		clocklo = ntohl(READL(ctx->hca_core_clock + 4));
+		clockhi1 = ntohl(READL(ctx->hca_core_clock));
+		if (clockhi == clockhi1)
+			break;
+	}
+
+	*cycles = (uint64_t)(clockhi & 0x7fffffff) << 32 | (uint64_t)clocklo;
+
+	return 0;
+}
+
+int mlx5_exp_query_values(struct ibv_context *context, int q_values,
+			  struct ibv_exp_values *values)
+{
+	int err = 0;
+
+	values->comp_mask = 0;
+
+	if (q_values & (IBV_EXP_VALUES_HW_CLOCK | IBV_EXP_VALUES_HW_CLOCK_NS)) {
+		uint64_t cycles;
+
+		err = mlx5_read_clock(context, &cycles);
+		if (!err) {
+			if (q_values & IBV_EXP_VALUES_HW_CLOCK) {
+				values->hwclock = cycles;
+				values->comp_mask |= IBV_EXP_VALUES_HW_CLOCK;
+			}
+			if (q_values & IBV_EXP_VALUES_HW_CLOCK_NS) {
+				struct mlx5_context *ctx = to_mctx(context);
+
+				values->hwclock_ns =
+					(((uint64_t)values->hwclock &
+					  ctx->core_clock.mask) *
+					 ctx->core_clock.mult)
+					>> ctx->core_clock.shift;
+				values->comp_mask |= IBV_EXP_VALUES_HW_CLOCK_NS;
+			}
+		}
+	}
+
+	return err;
+}
+

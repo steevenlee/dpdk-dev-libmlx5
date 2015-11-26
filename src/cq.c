@@ -214,9 +214,25 @@ static inline void *get_sw_cqe(struct mlx5_cq *cq, int n)
 	}
 }
 
-static void *next_cqe_sw(struct mlx5_cq *cq)
+static inline struct mlx5_cqe64 *get_next_cqe(struct mlx5_cq *cq,  const int cqe_sz)
 {
-	return get_sw_cqe(cq, cq->cons_index);
+	unsigned idx = cq->cons_index & cq->ibv_cq.cqe;
+	void *cqe = cq->active_buf->buf + idx * cqe_sz;
+	struct mlx5_cqe64 *cqe64;
+
+	cqe64 = (cqe_sz == 64) ? cqe : cqe + 64;
+
+	if (likely((cqe64->op_own) >> 4 != MLX5_CQE_INVALID) &&
+	    !((cqe64->op_own & MLX5_CQE_OWNER_MASK) ^ !!(cq->cons_index & (cq->ibv_cq.cqe + 1)))) {
+		return cqe64;
+	}
+
+	return NULL;
+}
+
+static struct mlx5_cqe64 *next_cqe_sw(struct mlx5_cq *cq)
+{
+	return get_next_cqe(cq, cq->cqe_sz);
 }
 
 static void handle_good_req(struct ibv_wc *wc, struct mlx5_cqe64 *cqe)
@@ -606,16 +622,18 @@ static inline int mlx5_poll_one(struct mlx5_cq *cq,
 	enum mlx5_rsc_type type = MLX5_RSC_TYPE_INVAL;
 	int cqe_format;
 	uint8_t l3_hdr;
+	int timestamp_en = cq->creation_flags &
+		MLX5_CQ_CREATION_FLAG_COMPLETION_TIMESTAMP;
 
-	cqe = next_cqe_sw(cq);
-	if (!cqe)
+	cqe64 = next_cqe_sw(cq);
+	if (!cqe64)
 		return CQ_EMPTY;
 
-	cqe_format = mlx5_get_cqe_format(cqe);
-	if (unlikely(cqe_format == MLX5_COMPRESSED))
+	cqe_format = mlx5_get_cqe_format(cqe64);
+	if (unlikely(cqe_format == MLX5_COMPRESSED)) {
 		mlx5_decompress_cqe(cq);
-
-	cqe64 = (cq->cqe_sz == 64) ? cqe : cqe + 64;
+		timestamp_en = 0;
+	}
 
 	++cq->cons_index;
 
@@ -720,14 +738,17 @@ static inline int mlx5_poll_one(struct mlx5_cq *cq,
 		wqe_ctr = ntohs(cqe64->wqe_counter);
 		idx = wqe_ctr & (wq->wqe_cnt - 1);
 		handle_good_req((struct ibv_wc *)wc, cqe64);
-		if (cqe_format == MLX5_INLINE_DATA32_SEG)
+		if (cqe_format == MLX5_INLINE_DATA32_SEG) {
+			cqe = (cq->cqe_sz == 64) ? cqe64 : cqe64 - 1;
 			err = mlx5_copy_to_send_wqe(mqp, wqe_ctr, cqe,
 						    wc->byte_len);
-		else if (cqe_format == MLX5_INLINE_DATA64_SEG)
+		} else if (cqe_format == MLX5_INLINE_DATA64_SEG) {
+			cqe = cqe64 - 1;
 			err = mlx5_copy_to_send_wqe(mqp, wqe_ctr, cqe - 1,
 						    wc->byte_len);
-		else
+		} else {
 			err = 0;
+		}
 
 		wc->wr_id = wq->wrid[idx];
 		wq->tail = mqp->gen_data.wqe_head[idx] + 1;
@@ -796,6 +817,11 @@ static inline int mlx5_poll_one(struct mlx5_cq *cq,
 		break;
 	}
 
+	if (unlikely(timestamp_en)) {
+		wc->timestamp = ntohll(cqe64->timestamp);
+		exp_wc_flags |= IBV_EXP_WC_WITH_TIMESTAMP;
+	}
+
 	if (likely(offsetof(struct ibv_exp_wc, exp_wc_flags) < wc_size))
 		wc->exp_wc_flags = exp_wc_flags | (uint64_t)((struct ibv_wc *)wc)->wc_flags;
 
@@ -824,7 +850,7 @@ static inline int poll_cq(struct ibv_cq *ibcq, int ne, struct ibv_exp_wc *wc,
 		}
 	}
 
-	mlx5_spin_lock(&cq->lock);
+	mlx5_lock(&cq->lock);
 
 	for (npolled = 0, twc = wc; npolled < ne; ++npolled, twc += wc_size) {
 		err = mlx5_poll_one(cq, &rsc, &srq, twc, wc_size, cqe_ver);
@@ -834,7 +860,7 @@ static inline int poll_cq(struct ibv_cq *ibcq, int ne, struct ibv_exp_wc *wc,
 
 	mlx5_update_cons_index(cq);
 
-	mlx5_spin_unlock(&cq->lock);
+	mlx5_unlock(&cq->lock);
 
 	if (cq->stall_enable) {
 		if (cq->stall_adaptive_enable) {
@@ -1009,9 +1035,9 @@ void __mlx5_cq_clean(struct mlx5_cq *cq, uint32_t rsn_uidx, struct mlx5_srq *srq
 
 void mlx5_cq_clean(struct mlx5_cq *cq, uint32_t qpn, struct mlx5_srq *srq)
 {
-	mlx5_spin_lock(&cq->lock);
+	mlx5_lock(&cq->lock);
 	__mlx5_cq_clean(cq, qpn, srq);
-	mlx5_spin_unlock(&cq->lock);
+	mlx5_unlock(&cq->lock);
 }
 
 static uint8_t sw_ownership_bit(int n, int nent)
@@ -1116,22 +1142,6 @@ int mlx5_free_cq_buf(struct mlx5_context *ctx, struct mlx5_buf *buf)
 /*
  *  poll  family functions
  */
-static inline struct mlx5_cqe64 *get_next_cqe(struct mlx5_cq *cq,  const int cqe_sz)
-{
-	unsigned idx = cq->cons_index & cq->ibv_cq.cqe;
-	void *cqe = cq->active_buf->buf + idx * cqe_sz;
-	struct mlx5_cqe64 *cqe64;
-
-	cqe64 = (cqe_sz == 64) ? cqe : cqe + 64;
-
-	if (likely((cqe64->op_own) >> 4 != MLX5_CQE_INVALID) &&
-	    !((cqe64->op_own & MLX5_CQE_OWNER_MASK) ^ !!(cq->cons_index & (cq->ibv_cq.cqe + 1)))) {
-		return cqe64;
-	}
-
-	return NULL;
-}
-
 static inline struct mlx5_resource *find_rsc(struct mlx5_cq *cq,
 					     struct mlx5_cqe64 *cqe64,
 					     const int cqe_ver) __attribute__((always_inline));
@@ -1166,7 +1176,7 @@ static inline int32_t poll_cnt(struct ibv_cq *ibcq, uint32_t max_entries,
 	int npolled;
 
 	if (unlikely(use_lock))
-		pthread_spin_lock(&cq->lock.lock);
+		mlx5_lock(&cq->lock);
 
 	for (npolled = 0; npolled < max_entries; ++npolled) {
 		cqe64 = get_next_cqe(cq, cqe_sz);
@@ -1210,7 +1220,7 @@ static inline int32_t poll_cnt(struct ibv_cq *ibcq, uint32_t max_entries,
 	}
 
 	if (unlikely(use_lock))
-		pthread_spin_unlock(&cq->lock.lock);
+		mlx5_unlock(&cq->lock);
 
 	return err == CQ_POLL_ERR ? -1 : npolled;
 }
@@ -1252,7 +1262,7 @@ static inline int32_t poll_length(struct ibv_cq *ibcq, void *buf, uint32_t *inl,
 	int cqe_format;
 
 	if (unlikely(use_lock))
-		pthread_spin_lock(&cq->lock.lock);
+		mlx5_lock(&cq->lock);
 
 	cqe64 = get_next_cqe(cq, cqe_sz);
 
@@ -1320,7 +1330,7 @@ static inline int32_t poll_length(struct ibv_cq *ibcq, void *buf, uint32_t *inl,
 
 out:
 	if (unlikely(use_lock))
-		pthread_spin_unlock(&cq->lock.lock);
+		mlx5_unlock(&cq->lock);
 
 	return err == CQ_POLL_ERR ? -1 : size;
 }

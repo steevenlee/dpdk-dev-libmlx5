@@ -506,6 +506,16 @@ static int get_cqe_comp(struct ibv_context *context)
 	return strcmp(env, "0") ? 1 : 0;
 }
 
+static int get_use_mutex(struct ibv_context *context)
+{
+	char env[VERBS_MAX_ENV_VAL];
+
+	if (ibv_exp_cmd_getenv(context, "MLX5_USE_MUTEX", env, sizeof(env)))
+		return 0;
+
+	return strcmp(env, "0") ? 1 : 0;
+}
+
 static int get_num_low_lat_uuars(void)
 {
 	return 4;
@@ -609,6 +619,7 @@ static void set_experimental(struct ibv_context *ctx)
 	verbs_set_exp_ctx_op(verbs_exp_ctx, exp_release_intf, mlx5_exp_release_intf);
 	verbs_set_exp_ctx_op(verbs_exp_ctx, drv_exp_query_port, mlx5_exp_query_port);
 	verbs_set_exp_ctx_op(verbs_exp_ctx, drv_exp_ibv_create_ah, mlx5_exp_create_ah);
+	verbs_set_exp_ctx_op(verbs_exp_ctx, drv_exp_query_values, mlx5_exp_query_values);
 	if (mctx->cqe_version == 1)
 		verbs_set_exp_ctx_op(verbs_exp_ctx, drv_exp_ibv_poll_cq,
 				     mlx5_poll_cq_ex_1);
@@ -633,6 +644,7 @@ void read_init_vars(struct mlx5_context *ctx)
 	pthread_mutex_lock(&ctx->env_mtx);
 	if (!ctx->env_initialized) {
 		mlx5_single_threaded = single_threaded_app(&ctx->ibv_ctx);
+		mlx5_use_mutex = get_use_mutex(&ctx->ibv_ctx);
 		open_debug_file(ctx);
 		set_debug_mask(&ctx->ibv_ctx);
 		set_freeze_on_error(&ctx->ibv_ctx);
@@ -642,6 +654,30 @@ void read_init_vars(struct mlx5_context *ctx)
 		ctx->env_initialized = 1;
 	}
 	pthread_mutex_unlock(&ctx->env_mtx);
+}
+
+static int mlx5_map_internal_clock(struct mlx5_device *mdev,
+				   struct ibv_context *ibv_ctx)
+{
+	struct mlx5_context *context = to_mctx(ibv_ctx);
+	void *hca_clock_page;
+	off_t offset = 0;
+
+	set_command(MLX5_EXP_MMAP_GET_CORE_CLOCK_CMD, &offset);
+	hca_clock_page = mmap(NULL, mdev->page_size,
+			      PROT_READ, MAP_SHARED, ibv_ctx->cmd_fd,
+			      offset * mdev->page_size);
+
+	if (hca_clock_page == MAP_FAILED) {
+		fprintf(stderr, PFX
+			"Warning: Timestamp available,\n"
+			"but failed to mmap() hca core clock page.\n");
+		return -1;
+	}
+
+	context->hca_core_clock = hca_clock_page + context->core_clock.offset;
+
+	return 0;
 }
 
 enum mlx5_cap_flags {
@@ -745,6 +781,25 @@ static int mlx5_alloc_context(struct verbs_device *vdev,
 
 	}
 
+	if (resp.exp_data.comp_mask & MLX5_EXP_ALLOC_CTX_RESP_MASK_HCA_CORE_CLOCK_OFFSET) {
+		context->core_clock.offset =
+			resp.exp_data.hca_core_clock_offset &
+			(to_mdev(ibdev)->page_size - 1);
+		mlx5_map_internal_clock(to_mdev(ibdev), ctx);
+		if (attr.hca_core_clock)
+			context->core_clock.mult = ((1ull * 1000) << 21) /
+				attr.hca_core_clock;
+		else
+			context->core_clock.mult = 0;
+
+		/* ConnectX-4 supports 64bit timestamp. We choose these numbers
+		 * in order to make sure that after arithmetic operations,
+		 * we don't overflow a 64bit variable.
+		 */
+		context->core_clock.shift = 21;
+		context->core_clock.mask = (1ULL << 49) - 1;
+	}
+
 	pthread_mutex_init(&context->rsc_table_mutex, NULL);
 	pthread_mutex_init(&context->srq_table_mutex, NULL);
 	for (i = 0; i < MLX5_QP_TABLE_SIZE; ++i)
@@ -760,6 +815,7 @@ static int mlx5_alloc_context(struct verbs_device *vdev,
 	context->prefer_bf = get_always_bf(&context->ibv_ctx);
 	context->shut_up_bf = get_shut_up_bf(&context->ibv_ctx);
 	context->enable_cqe_comp = get_cqe_comp(&context->ibv_ctx);
+	mlx5_use_mutex = get_use_mutex(&context->ibv_ctx);
 
 	offset = 0;
 	set_command(MLX5_MMAP_MAP_DC_INFO_PAGE, &offset);
@@ -809,7 +865,9 @@ static int mlx5_alloc_context(struct verbs_device *vdev,
 			MLX5_BF_OFFSET + (j % 4) * context->bf_reg_size;
 		context->bfs[j].need_lock = need_uuar_lock(context, j) &&
 					    context->uar[j / 4].map_type == MLX5_UAR_MAP_WC;
-		mlx5_spinlock_init(&context->bfs[j].lock, !mlx5_single_threaded);
+		mlx5_lock_init(&context->bfs[j].lock,
+			       !mlx5_single_threaded,
+			       mlx5_get_locktype());
 		context->bfs[j].offset = 0;
 		if (context->uar[j / 4].map_type == MLX5_UAR_MAP_WC) {
 			context->bfs[j].buf_size = context->bf_reg_size / 2;
@@ -826,7 +884,9 @@ static int mlx5_alloc_context(struct verbs_device *vdev,
 		context->bfs[j].uuarn = j;
 	}
 
-	mlx5_spinlock_init(&context->lock32, !mlx5_single_threaded);
+	mlx5_lock_init(&context->lock32,
+		       !mlx5_single_threaded,
+		       mlx5_get_locktype());
 
 	mlx5_spinlock_init(&context->hugetlb_lock, !mlx5_single_threaded);
 	INIT_LIST_HEAD(&context->hugetlb_list);
@@ -844,6 +904,10 @@ static int mlx5_alloc_context(struct verbs_device *vdev,
 err_free_cc:
 	if (context->cc.buf)
 		munmap(context->cc.buf, 4096 * context->num_ports);
+
+	if (context->hca_core_clock)
+		munmap(context->hca_core_clock - context->core_clock.offset,
+		       to_mdev(ibdev)->page_size);
 
 err_free_bf:
 	free(context->bfs);
@@ -864,6 +928,10 @@ static void mlx5_free_context(struct verbs_device *device,
 	struct mlx5_context *context = to_mctx(ibctx);
 	int page_size = to_mdev(ibctx->device)->page_size;
 	int i;
+
+	if (context->hca_core_clock)
+		munmap(context->hca_core_clock - context->core_clock.offset,
+		       to_mdev(&device->device)->page_size);
 
 	if (context->cc.buf)
 		munmap(context->cc.buf, 4096 * context->num_ports);
