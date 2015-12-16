@@ -2652,9 +2652,9 @@ static inline int recv_sg_list(struct mlx5_wq *rq, struct ibv_sge *sg_list, uint
 
 /* burst family - recv_burst */
 static inline int recv_burst(struct mlx5_wq *rq, struct ibv_sge *sg_list, uint32_t num,
-			     const int thread_safe, const int max_one_sge)  __attribute__((always_inline));
+			     const int thread_safe, const int max_one_sge, const int mp_rq)  __attribute__((always_inline));
 static inline int recv_burst(struct mlx5_wq *rq, struct ibv_sge *sg_list, uint32_t num,
-			     const int thread_safe, const int max_one_sge)
+			     const int thread_safe, const int max_one_sge, const int mp_rq)
 {
 	struct mlx5_wqe_data_seg *scat;
 	unsigned int ind;
@@ -2666,6 +2666,15 @@ static inline int recv_burst(struct mlx5_wq *rq, struct ibv_sge *sg_list, uint32
 	ind = rq->head & (rq->wqe_cnt - 1);
 	for (i = 0; i < num; ++i) {
 		scat = get_recv_wqe(rq, ind);
+		/* Multi-Packet RQ WQE format is like SRQ format and requires
+		 * a next-segment octword.
+		 * This next-segment octword is reserved (therefore cleared)
+		 * when we use CYCLIC_STRIDING_RQ
+		 */
+		if (mp_rq) {
+			memset(scat, 0, sizeof(struct mlx5_wqe_srq_next_seg));
+			scat++;
+		}
 		scat->byte_count = htonl(sg_list->length);
 		scat->lkey       = htonl(sg_list->lkey);
 		scat->addr       = htonll(sg_list->addr);
@@ -2700,7 +2709,7 @@ static int mlx5_recv_burst_safe(struct ibv_qp *ibqp, struct ibv_sge *sg_list, ui
 {
 	struct mlx5_qp *qp = to_mqp(ibqp);
 
-	return recv_burst(&qp->rq, sg_list, num, 1, qp->rq.max_gs == 1);
+	return recv_burst(&qp->rq, sg_list, num, 1, qp->rq.max_gs == 1, 0);
 }
 
 #define MLX5_RECV_BURST_UNSAFE_NAME(_1sge) mlx5_recv_burst_unsafe_##_1sge
@@ -2712,7 +2721,7 @@ static int mlx5_recv_burst_safe(struct ibv_qp *ibqp, struct ibv_sge *sg_list, ui
 					struct ibv_qp *ibqp, struct ibv_sge *sg_list,	\
 					uint32_t num)					\
 	{										\
-		return recv_burst(&to_mqp(ibqp)->rq, sg_list, num, 0, _1sge);		\
+		return recv_burst(&to_mqp(ibqp)->rq, sg_list, num, 0, _1sge, 0);	\
 	}
 /*		       _1sge */
 MLX5_RECV_BURST_UNSAFE(0);
@@ -2809,6 +2818,12 @@ struct ibv_exp_qp_burst_family *mlx5_get_qp_burst_family(struct mlx5_qp *qp,
 	uint32_t unsupported_f;
 	int mpw;
 
+	if (params->intf_version > MLX5_MAX_QP_BURST_FAMILY_VER) {
+		*status = IBV_EXP_INTF_STAT_VERSION_NOT_SUPPORTED;
+
+		return NULL;
+	}
+
 	if ((qp->verbs_qp.qp.state < IBV_QPS_INIT) || (qp->verbs_qp.qp.state > IBV_QPS_RTS)) {
 			*status = IBV_EXP_INTF_STAT_INVAL_OBJ_STATE;
 			return NULL;
@@ -2875,19 +2890,22 @@ static int mlx5_wq_recv_burst_safe(struct ibv_exp_wq *ibwq, struct ibv_sge *sg_l
 {
 	struct mlx5_rwq *rwq = to_mrwq(ibwq);
 
-	return recv_burst(&rwq->rq, sg_list, num, 1, rwq->rq.max_gs == 1);
+	return recv_burst(&rwq->rq, sg_list, num, 1, rwq->rq.max_gs == 1, rwq->rsc.type == MLX5_RSC_TYPE_MP_RWQ);
 }
 
 #define MLX5_WQ_RECV_BURST_UNSAFE_NAME(_1sge) mlx5_wq_recv_burst_unsafe_##_1sge
 #define MLX5_WQ_RECV_BURST_UNSAFE(_1sge)						\
 	static int MLX5_WQ_RECV_BURST_UNSAFE_NAME(_1sge)(				\
-				struct ibv_exp_wq *ibqp, struct ibv_sge *sg_list,	\
+				struct ibv_exp_wq *ibwq, struct ibv_sge *sg_list,	\
 				uint32_t num) __MLX5_ALGN_F__;				\
 	static int MLX5_WQ_RECV_BURST_UNSAFE_NAME(_1sge)(				\
-				struct ibv_exp_wq *ibqp, struct ibv_sge *sg_list,	\
+				struct ibv_exp_wq *ibwq, struct ibv_sge *sg_list,	\
 				uint32_t num)						\
 	{										\
-		return recv_burst(&to_mrwq(ibqp)->rq, sg_list, num, 0, _1sge);		\
+		struct mlx5_rwq *rwq = to_mrwq(ibwq);					\
+											\
+		return recv_burst(&rwq->rq, sg_list, num, 0, _1sge,			\
+				  rwq->rsc.type == MLX5_RSC_TYPE_MP_RWQ);		\
 	}
 /*		       _1sge */
 MLX5_WQ_RECV_BURST_UNSAFE(0);
@@ -2944,6 +2962,12 @@ struct ibv_exp_wq_family *mlx5_get_wq_family(struct mlx5_rwq *rwq,
 {
 	enum ibv_exp_query_intf_status ret = IBV_EXP_INTF_STAT_OK;
 	struct ibv_exp_wq_family *family = NULL;
+
+	if (params->intf_version > MLX5_MAX_WQ_FAMILY_VER) {
+		*status = IBV_EXP_INTF_STAT_VERSION_NOT_SUPPORTED;
+
+		return NULL;
+	}
 
 	if (params->flags) {
 		fprintf(stderr, PFX "Global interface flags(0x%x) are not supported for WQ family\n", params->flags);
