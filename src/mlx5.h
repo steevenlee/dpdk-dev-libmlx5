@@ -127,6 +127,12 @@
 #define MLX5_MAX_PORTS_NUM	2
 
 enum {
+	MLX5_MAX_CQ_FAMILY_VER		= 1,
+	MLX5_MAX_QP_BURST_FAMILY_VER	= 0,
+	MLX5_MAX_WQ_FAMILY_VER		= 0
+};
+
+enum {
 	MLX5_IB_MMAP_CMD_SHIFT	= 8,
 	MLX5_IB_MMAP_CMD_MASK	= 0xff,
 };
@@ -307,6 +313,7 @@ enum mlx5_rsc_type {
 	MLX5_RSC_TYPE_QP,
 	MLX5_RSC_TYPE_DCT,
 	MLX5_RSC_TYPE_RWQ,
+	MLX5_RSC_TYPE_MP_RWQ,
 	MLX5_RSC_TYPE_XSRQ,
 	MLX5_RSC_TYPE_SRQ,
 	MLX5_RSC_TYPE_INVAL,
@@ -391,6 +398,7 @@ struct mlx5_context {
 	struct list_head		send_wc_db_list;
 	unsigned int			num_wc_uars;
 	int				max_ctx_res_domain;
+	uint64_t			exp_device_cap_flags; /* Cached from device caps */
 
 	struct mlx5_lock		lock32;
 	struct mlx5_db_page	       *db_list;
@@ -719,6 +727,28 @@ enum mlx5_wq_model_flags {
 	 * to sync between WQ API calls.
 	 */
 	MLX5_WQ_MODEL_FLAG_THREAD_SAFE = 1 << 0,
+
+	/*
+	 * This flag is used to cache the IBV_EXP_DEVICE_RX_CSUM_IP_PKT
+	 * device cap flag and it enables the related RX offloading support
+	 */
+	MLX5_WQ_MODEL_RX_CSUM_IP_OK_IP_NON_TCP_UDP = 1 << 1,
+};
+
+enum mlx5_mp_rq_sizes {
+	/*
+	 * Max log num of WQE strides supported by lib is 31 since related
+	 * "num of strides" variables size (i.e. consumed_strides_counter[] and
+	 * mp_rq_strides_in_wqe) is 32 bits
+	 */
+	MLX5_MP_RQ_MAX_LOG_NUM_STRIDES	= 31,
+	/*
+	 * Max log stride size supported by lib is 15 since related
+	 * "stride size" variable size (i.e. mp_rq_stride_size) is 16 bits
+	 */
+	MLX5_MP_RQ_MAX_LOG_STRIDE_SIZE	= 15,
+	MLX5_MP_RQ_SUPPORTED_QPT	= IBV_EXP_QPT_RAW_PACKET,
+	MLX5_MP_RQ_SUPPORTED_SHIFTS	= IBV_EXP_MP_RQ_2BYTES_SHIFT
 };
 
 struct mlx5_rwq {
@@ -730,6 +760,12 @@ struct mlx5_rwq {
 	/* hot data used on data path */
 	struct mlx5_wq rq __MLX5_ALGN_D__;
 	uint32_t *db;
+	/* Multi-Packet RQ hot data */
+	/* Table to hold the consumed strides on each WQE */
+	uint32_t *consumed_strides_counter;
+	uint16_t mp_rq_stride_size;
+	uint32_t mp_rq_strides_in_wqe;
+	uint8_t mp_rq_packet_padding;
 	/* recv-send enable hot data */
 	struct mlx5_wq_recv_send_enable rq_enable;
 	int wq_sig;
@@ -1079,9 +1115,9 @@ struct ibv_exp_qp_burst_family *mlx5_get_qp_burst_family(struct mlx5_qp *qp,
 struct ibv_exp_wq_family *mlx5_get_wq_family(struct mlx5_rwq *rwq,
 					     struct ibv_exp_query_intf_params *params,
 					     enum ibv_exp_query_intf_status *status);
-struct ibv_exp_cq_family *mlx5_get_poll_cq_family(struct mlx5_cq *cq,
-						  struct ibv_exp_query_intf_params *params,
-						  enum ibv_exp_query_intf_status *status);
+struct ibv_exp_cq_family_v1 *mlx5_get_poll_cq_family(struct mlx5_cq *cq,
+						     struct ibv_exp_query_intf_params *params,
+						     enum ibv_exp_query_intf_status *status);
 static inline void *mlx5_find_uidx(struct mlx5_context *ctx, uint32_t uidx)
 {
 	int tind = uidx >> MLX5_QP_TABLE_SHIFT;

@@ -82,6 +82,8 @@ struct {
 	HCA(MELLANOX, 4116),	/* ConnectX-4 VF */
 	HCA(MELLANOX, 4117),	/* ConnectX-4Lx */
 	HCA(MELLANOX, 4118),	/* ConnectX-4Lx VF */
+	HCA(MELLANOX, 4119),	/* ConnectX-5 */
+	HCA(MELLANOX, 4120),	/* ConnectX-5 VF */
 };
 
 uint32_t mlx5_debug_mask = 0;
@@ -774,30 +776,33 @@ static int mlx5_alloc_context(struct verbs_device *vdev,
 
 	attr.comp_mask = IBV_EXP_DEVICE_ATTR_RESERVED - 1;
 	err = mlx5_query_device_ex(ctx, &attr);
-	if (!err && (attr.comp_mask & IBV_EXP_DEVICE_ATTR_MAX_CTX_RES_DOMAIN)) {
-		context->max_ctx_res_domain = attr.max_ctx_res_domain;
-		mlx5_spinlock_init(&context->send_db_lock, !mlx5_single_threaded);
-		INIT_LIST_HEAD(&context->send_wc_db_list);
+	if (!err) {
+		if (attr.comp_mask & IBV_EXP_DEVICE_ATTR_EXP_CAP_FLAGS)
+			context->exp_device_cap_flags = attr.exp_device_cap_flags;
 
-	}
+		if (attr.comp_mask & IBV_EXP_DEVICE_ATTR_MAX_CTX_RES_DOMAIN) {
+			context->max_ctx_res_domain = attr.max_ctx_res_domain;
+			mlx5_spinlock_init(&context->send_db_lock, !mlx5_single_threaded);
+			INIT_LIST_HEAD(&context->send_wc_db_list);
+		}
+		if (resp.exp_data.comp_mask & MLX5_EXP_ALLOC_CTX_RESP_MASK_HCA_CORE_CLOCK_OFFSET) {
+			context->core_clock.offset =
+				resp.exp_data.hca_core_clock_offset &
+				(to_mdev(ibdev)->page_size - 1);
+			mlx5_map_internal_clock(to_mdev(ibdev), ctx);
+			if (attr.hca_core_clock)
+				context->core_clock.mult = ((1ull * 1000) << 21) /
+					attr.hca_core_clock;
+			else
+				context->core_clock.mult = 0;
 
-	if (resp.exp_data.comp_mask & MLX5_EXP_ALLOC_CTX_RESP_MASK_HCA_CORE_CLOCK_OFFSET) {
-		context->core_clock.offset =
-			resp.exp_data.hca_core_clock_offset &
-			(to_mdev(ibdev)->page_size - 1);
-		mlx5_map_internal_clock(to_mdev(ibdev), ctx);
-		if (attr.hca_core_clock)
-			context->core_clock.mult = ((1ull * 1000) << 21) /
-				attr.hca_core_clock;
-		else
-			context->core_clock.mult = 0;
-
-		/* ConnectX-4 supports 64bit timestamp. We choose these numbers
-		 * in order to make sure that after arithmetic operations,
-		 * we don't overflow a 64bit variable.
-		 */
-		context->core_clock.shift = 21;
-		context->core_clock.mask = (1ULL << 49) - 1;
+			/* ConnectX-4 supports 64bit timestamp. We choose these numbers
+			 * in order to make sure that after arithmetic operations,
+			 * we don't overflow a 64bit variable.
+			 */
+			context->core_clock.shift = 21;
+			context->core_clock.mask = (1ULL << 49) - 1;
+		}
 	}
 
 	pthread_mutex_init(&context->rsc_table_mutex, NULL);

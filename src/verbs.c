@@ -127,6 +127,23 @@ int mlx5_query_device_ex(struct ibv_context *context,
 	if (attr->comp_mask & IBV_EXP_DEVICE_ATTR_EXP_CAP_FLAGS)
 		attr->exp_device_cap_flags &= (~IBV_EXP_DEVICE_VXLAN_SUPPORT);
 
+	if (attr->comp_mask & IBV_EXP_DEVICE_ATTR_MP_RQ)
+		/* Lib supports MP-RQ only for RAW_ETH QPs reset other
+		 * QP types supported by kernel
+		 */
+		attr->mp_rq_caps.supported_qps &= IBV_EXP_QPT_RAW_PACKET;
+
+
+	if (attr->comp_mask & IBV_EXP_DEVICE_ATTR_MP_RQ) {
+		/* Update kernel caps to mp_rq caps supported by lib */
+		attr->mp_rq_caps.allowed_shifts &= MLX5_MP_RQ_SUPPORTED_SHIFTS;
+		attr->mp_rq_caps.supported_qps &= MLX5_MP_RQ_SUPPORTED_QPT;
+		if (attr->mp_rq_caps.max_single_stride_log_num_of_bytes > MLX5_MP_RQ_MAX_LOG_STRIDE_SIZE)
+			attr->mp_rq_caps.max_single_stride_log_num_of_bytes = MLX5_MP_RQ_MAX_LOG_STRIDE_SIZE;
+		if (attr->mp_rq_caps.max_single_wqe_log_num_of_strides > MLX5_MP_RQ_MAX_LOG_NUM_STRIDES)
+			attr->mp_rq_caps.max_single_wqe_log_num_of_strides = MLX5_MP_RQ_MAX_LOG_NUM_STRIDES;
+	}
+
 	return err;
 }
 
@@ -1280,13 +1297,19 @@ static int mlx5_calc_rwq_size(struct mlx5_context *ctx,
 	int wq_size;
 	int num_scatter;
 	int scat_spc;
+	int mp_rq = !!(attr->comp_mask & IBV_EXP_CREATE_WQ_MP_RQ);
 
 	if (!attr->max_recv_wr)
 		return -EINVAL;
 
 	/* TBD: check caps for RQ */
 	num_scatter = max(attr->max_recv_sge, 1);
-	wqe_size = sizeof(struct mlx5_wqe_data_seg) * num_scatter;
+	wqe_size = sizeof(struct mlx5_wqe_data_seg) * num_scatter +
+		   /* In case of mp_rq the WQE format is like SRQ.
+		    * Need to add the extra octword even when we don't
+		    * use linked list.
+		    */
+		   (mp_rq ? sizeof(struct mlx5_wqe_srq_next_seg) : 0);
 
 	if (rwq->wq_sig)
 		wqe_size += sizeof(struct mlx5_rwqe_sig);
@@ -1301,7 +1324,8 @@ static int mlx5_calc_rwq_size(struct mlx5_context *ctx,
 	rwq->rq.wqe_shift = mlx5_ilog2(wqe_size);
 	rwq->rq.max_post = 1 << mlx5_ilog2(wq_size / wqe_size);
 	scat_spc = wqe_size -
-		((rwq->wq_sig) ? sizeof(struct mlx5_rwqe_sig) : 0);
+		   ((rwq->wq_sig) ? sizeof(struct mlx5_rwqe_sig) : 0) -
+		   (mp_rq ? sizeof(struct mlx5_wqe_srq_next_seg) : 0);
 	rwq->rq.max_gs = scat_spc / sizeof(struct mlx5_wqe_data_seg);
 	return wq_size;
 }
@@ -1399,13 +1423,16 @@ static void mlx5_free_rwq_buf(struct mlx5_rwq *rwq, struct ibv_context *context)
 	struct mlx5_context *ctx = to_mctx(context);
 
 	mlx5_free_actual_buf(ctx, &rwq->buf);
-	if (rwq->rq.wrid)
-		free(rwq->rq.wrid);
+	if (rwq->consumed_strides_counter)
+		free(rwq->consumed_strides_counter);
+
+	free(rwq->rq.wrid);
 }
 
 static int mlx5_alloc_rwq_buf(struct ibv_context *context,
 			      struct mlx5_rwq *rwq,
-			      int size)
+			      int size,
+			      enum mlx5_rsc_type rsc_type)
 {
 	int err;
 	enum mlx5_alloc_type default_alloc_type = MLX5_ALLOC_TYPE_PREFER_CONTIG;
@@ -1414,6 +1441,14 @@ static int mlx5_alloc_rwq_buf(struct ibv_context *context,
 	if (!rwq->rq.wrid) {
 		errno = ENOMEM;
 		return -1;
+	}
+
+	if (rsc_type == MLX5_RSC_TYPE_MP_RWQ) {
+		rwq->consumed_strides_counter = calloc(1, rwq->rq.wqe_cnt * sizeof(uint32_t));
+		if (!rwq->consumed_strides_counter) {
+			errno = ENOMEM;
+			goto free_wr_id;
+		}
 	}
 
 	rwq->buf.numa_req.valid = 1;
@@ -1426,13 +1461,20 @@ static int mlx5_alloc_rwq_buf(struct ibv_context *context,
 				      MLX5_RWQ_PREFIX);
 
 	if (err) {
-		free(rwq->rq.wrid);
-		rwq->rq.wrid = NULL;
 		errno = ENOMEM;
-		return -1;
+		goto free_strd_cnt;
 	}
 
 	return 0;
+
+free_strd_cnt:
+	if (rwq->consumed_strides_counter)
+		free(rwq->consumed_strides_counter);
+
+free_wr_id:
+	free(rwq->rq.wrid);
+
+	return -1;
 }
 static int mlx5_alloc_qp_buf(struct ibv_context *context,
 			     struct ibv_exp_qp_init_attr *attr,
@@ -1974,6 +2016,8 @@ struct ibv_exp_wq *mlx5_exp_create_wq(struct ibv_context *context,
 	struct mlx5_context	*ctx = to_mctx(context);
 	int ret;
 	int thread_safe = !mlx5_single_threaded;
+	struct ibv_exp_device_attr device_attr;
+	enum mlx5_rsc_type	rsc_type;
 #ifdef MLX5_DEBUG
 	FILE *fp = ctx->dbg_fp;
 #endif
@@ -1999,7 +2043,23 @@ struct ibv_exp_wq *mlx5_exp_create_wq(struct ibv_context *context,
 	}
 
 	rwq->buf_size = ret;
-	if (mlx5_alloc_rwq_buf(context, rwq, ret))
+	if (attr->comp_mask & IBV_EXP_CREATE_WQ_MP_RQ) {
+		/* Make sure requested mp_rq values supported by lib */
+		if ((attr->mp_rq.single_stride_log_num_of_bytes > MLX5_MP_RQ_MAX_LOG_STRIDE_SIZE) ||
+		    (attr->mp_rq.single_wqe_log_num_of_strides > MLX5_MP_RQ_MAX_LOG_NUM_STRIDES) ||
+		    (attr->mp_rq.use_shift & ~MLX5_MP_RQ_SUPPORTED_SHIFTS)) {
+			errno = EINVAL;
+			goto err;
+		}
+		rsc_type = MLX5_RSC_TYPE_MP_RWQ;
+		rwq->mp_rq_stride_size = 1 << attr->mp_rq.single_stride_log_num_of_bytes;
+		rwq->mp_rq_strides_in_wqe = 1 << attr->mp_rq.single_wqe_log_num_of_strides;
+		if (attr->mp_rq.use_shift == IBV_EXP_MP_RQ_2BYTES_SHIFT)
+			rwq->mp_rq_packet_padding = 2;
+	} else {
+		rsc_type = MLX5_RSC_TYPE_RWQ;
+	}
+	if (mlx5_alloc_rwq_buf(context, rwq, ret, rsc_type))
 		goto err;
 
 	mlx5_init_rwq_indices(rwq);
@@ -2008,6 +2068,15 @@ struct ibv_exp_wq *mlx5_exp_create_wq(struct ibv_context *context,
 		thread_safe = (to_mres_domain(attr->res_domain)->attr.thread_model == IBV_EXP_THREAD_SAFE);
 
 	rwq->model_flags = thread_safe ? MLX5_WQ_MODEL_FLAG_THREAD_SAFE : 0;
+
+	memset(&device_attr, 0, sizeof(device_attr));
+	device_attr.comp_mask = IBV_EXP_DEVICE_ATTR_EXP_CAP_FLAGS;
+	ret = ibv_exp_query_device(context, &device_attr);
+	/* Check if RX offloads supported */
+	if (!ret && (device_attr.comp_mask & IBV_EXP_DEVICE_ATTR_EXP_CAP_FLAGS) &&
+	    (device_attr.exp_device_cap_flags & IBV_EXP_DEVICE_RX_CSUM_IP_PKT))
+		rwq->model_flags |= MLX5_WQ_MODEL_RX_CSUM_IP_OK_IP_NON_TCP_UDP;
+
 	if (mlx5_lock_init(&rwq->rq.lock, thread_safe, mlx5_get_locktype()))
 		goto err_free_rwq_buf;
 
@@ -2039,7 +2108,7 @@ struct ibv_exp_wq *mlx5_exp_create_wq(struct ibv_context *context,
 	if (err)
 		goto err_create;
 
-	rwq->rsc.type = MLX5_RSC_TYPE_RWQ;
+	rwq->rsc.type = rsc_type;
 	rwq->rsc.rsn =  cmd.drv.user_index;
 
 	return &rwq->wq;
@@ -2378,21 +2447,38 @@ int mlx5_query_qp(struct ibv_qp *ibqp, struct ibv_qp_attr *attr,
 	return 0;
 }
 
+static int update_port_data(struct ibv_qp *qp, uint8_t port_num)
+{
+	struct mlx5_context *ctx = to_mctx(qp->context);
+	struct mlx5_qp *mqp = to_mqp(qp);
+	struct ibv_port_attr port_attr;
+	int err;
+
+	err = ibv_query_port(qp->context, port_num, &port_attr);
+	if (err)
+		return err;
+
+	mqp->link_layer = port_attr.link_layer;
+	if ((((qp->qp_type == IBV_QPT_UD) && (mqp->link_layer == IBV_LINK_LAYER_INFINIBAND)) ||
+	     ((qp->qp_type == IBV_QPT_RAW_ETH) && (mqp->link_layer == IBV_LINK_LAYER_ETHERNET))) &&
+	    (ctx->exp_device_cap_flags & IBV_EXP_DEVICE_RX_CSUM_IP_PKT))
+		mqp->gen_data.model_flags |= MLX5_QP_MODEL_RX_CSUM_IP_OK_IP_NON_TCP_UDP;
+
+	return 0;
+}
+
 int mlx5_modify_qp(struct ibv_qp *qp, struct ibv_qp_attr *attr,
 		   int attr_mask)
 {
 	struct mlx5_qp *mqp = to_mqp(qp);
-	struct ibv_port_attr port_attr;
 	struct ibv_modify_qp cmd;
-	int ret;
 	uint32_t *db;
+	int ret;
 
 	if (attr_mask & IBV_QP_PORT) {
-		ret = ibv_query_port(qp->context, attr->port_num,
-				     &port_attr);
+		ret = update_port_data(qp, attr->port_num);
 		if (ret)
 			return ret;
-		mqp->link_layer = port_attr.link_layer;
 	}
 
 	if (to_mqp(qp)->rx_qp)
@@ -2818,29 +2904,14 @@ int mlx5_modify_qp_ex(struct ibv_qp *qp, struct ibv_exp_qp_attr *attr,
 		      uint64_t attr_mask)
 {
 	struct mlx5_qp *mqp = to_mqp(qp);
-	struct ibv_port_attr port_attr;
 	struct ibv_exp_modify_qp cmd;
-	struct ibv_exp_device_attr device_attr;
-	int ret;
 	uint32_t *db;
+	int ret;
 
 	if (attr_mask & IBV_QP_PORT) {
-		ret = ibv_query_port(qp->context, attr->port_num,
-				     &port_attr);
+		ret = update_port_data(qp, attr->port_num);
 		if (ret)
 			return ret;
-		mqp->link_layer = port_attr.link_layer;
-		if (((qp->qp_type == IBV_QPT_UD) && (mqp->link_layer == IBV_LINK_LAYER_INFINIBAND)) ||
-		    ((qp->qp_type == IBV_QPT_RAW_ETH) && (mqp->link_layer == IBV_LINK_LAYER_ETHERNET))) {
-			memset(&device_attr, 0, sizeof(device_attr));
-			device_attr.comp_mask = IBV_EXP_DEVICE_ATTR_RESERVED - 1;
-			ret = ibv_exp_query_device(qp->context, &device_attr);
-			if (ret)
-				return ret;
-			if ((device_attr.comp_mask & IBV_EXP_DEVICE_ATTR_EXP_CAP_FLAGS) &&
-			    (device_attr.exp_device_cap_flags & IBV_EXP_DEVICE_RX_CSUM_IP_PKT))
-				mqp->gen_data.model_flags |= MLX5_QP_MODEL_RX_CSUM_IP_OK_IP_NON_TCP_UDP;
-		}
 	}
 
 	if (mqp->rx_qp)
