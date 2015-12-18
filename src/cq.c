@@ -1238,7 +1238,9 @@ static inline int32_t poll_cnt(struct ibv_cq *ibcq, uint32_t max_entries,
 		cur_rsc = find_rsc(cq, cqe64, cqe_ver);
 		if (unlikely(!cur_rsc)) {
 			err = CQ_POLL_ERR;
+#ifdef MLX5_DEBUG
 			fprintf(stderr, "Failed to find send QP on poll_cnt\n");
+#endif
 			break;
 		}
 		mqp = (struct mlx5_qp *)cur_rsc;
@@ -1249,10 +1251,12 @@ static inline int32_t poll_cnt(struct ibv_cq *ibcq, uint32_t max_entries,
 			++mqp->rq.tail;
 		} else {
 			err = CQ_POLL_ERR;
+#ifdef MLX5_DEBUG
 			if ((cqe64->op_own >> 4) == MLX5_CQE_REQ_ERR)
 				fprintf(stderr, "MLX5_CQE_REQ_ERR received on poll_cnt\n");
 			else
 				fprintf(stderr, "Non requester message received on poll_cnt\n");
+#endif
 		}
 
 		if (unlikely(err != CQ_OK))
@@ -1319,6 +1323,7 @@ static inline int32_t poll_length(struct ibv_cq *ibcq, void *buf, uint32_t *inl,
 		}
 
 		if (unlikely((cqe64->op_own >> 4) != MLX5_CQE_RESP_SEND)) {
+#ifdef MLX5_DEBUG
 			if (cqe64->op_own >> 4 == MLX5_CQE_RESP_ERR)
 				fprintf(stderr, "poll_length, CQE response error, syndrome=0x%x, vendor syndrome error=0x%x, HW syndrome 0x%x, HW syndrome type 0x%x\n",
 					((struct mlx5_err_cqe *)cqe64)->syndrome, ((struct mlx5_err_cqe *)cqe64)->vendor_err_synd,
@@ -1326,12 +1331,15 @@ static inline int32_t poll_length(struct ibv_cq *ibcq, void *buf, uint32_t *inl,
 			else
 				fprintf(stderr, "Only post-receive completion supported on poll_length, op=%u\n",
 					cqe64->op_own >> 4);
+#endif
 			err = CQ_POLL_ERR;
 			goto out;
 		}
 		cur_rsc = find_rsc(cq, cqe64, cqe_ver);
 		if (unlikely(!cur_rsc)) {
+#ifdef MLX5_DEBUG
 			fprintf(stderr, "Failed to find QP resource on poll_length\n");
+#endif
 			err = CQ_POLL_ERR;
 			goto out;
 		}
@@ -1341,8 +1349,10 @@ static inline int32_t poll_length(struct ibv_cq *ibcq, void *buf, uint32_t *inl,
 			uint16_t wqe_id;
 
 			if (unlikely(!offset)) {
+#ifdef MLX5_DEBUG
 				fprintf(stderr, "Can't handle Multi-Packet RQ completion since"
 						" 'offset' output parameter is not provided\n");
+#endif
 				err = CQ_POLL_ERR;
 				goto out;
 			}
@@ -1393,7 +1403,9 @@ static inline int32_t poll_length(struct ibv_cq *ibcq, void *buf, uint32_t *inl,
 				if (likely(cur_rsc->type == MLX5_RSC_TYPE_RWQ)) {
 					rwq = (struct mlx5_rwq *)cur_rsc;
 				} else {
+#ifdef MLX5_DEBUG
 					fprintf(stderr, "Invalid resource type(%d) on poll_length\n", cur_rsc->type);
+#endif
 					err = CQ_POLL_ERR;
 					goto out;
 				}
@@ -1416,7 +1428,9 @@ static inline int32_t poll_length(struct ibv_cq *ibcq, void *buf, uint32_t *inl,
 				} else {
 					wqe_ctr = mqp->rq.tail & (mqp->rq.wqe_cnt - 1);
 					if (unlikely(mlx5_copy_to_recv_wqe(mqp, wqe_ctr, data, size))) {
+#ifdef MLX5_DEBUG
 						fprintf(stderr, "Fail to copy inline receive message to receive buffer\n");
+#endif
 						err = CQ_POLL_ERR;
 						goto out;
 					}
