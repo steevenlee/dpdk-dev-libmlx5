@@ -529,6 +529,17 @@ enum mlx5_cq_creation_flags {
 };
 
 /* MLX5_HW_EXPORT_BEGIN */
+struct mlx5_cq_compress
+{
+	struct mlx5_cqe64 *cqe;
+	struct mlx5_mini_cqe8 *cqe_minis;
+	int cqe_cnt;
+	int wqe_cnt;
+	int cqe_idx;
+	int cqe_cons;
+	int cqe_is_req;
+};
+
 struct mlx5_cq {
 	struct ibv_cq			ibv_cq;
 	uint32_t			creation_flags;
@@ -557,6 +568,7 @@ struct mlx5_cq {
 	uint16_t			cqe_comp_max_num;
 	uint8_t				cq_log_size;
 	void				*wq; /* set if in use by a wq. */
+	struct mlx5_cq_compress		cqec;
 };
 
 struct mlx5_srq {

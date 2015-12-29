@@ -1705,6 +1705,70 @@ static int32_t poll_length_rwq(struct mlx5_resource *cur_rsc, struct mlx5_cqe64 
 	return size;
 }
 
+static inline void mlx5_uncompress_cqe(struct mlx5_cq *cq, uint32_t cqe_idx)
+	__attribute__((always_inline));
+static inline struct mlx5_cqe64* mlx5_uncompress_cqe_next(struct mlx5_cq *cq)
+	__attribute__((always_inline));
+
+static inline void mlx5_uncompress_cqe(struct mlx5_cq *cq, uint32_t cqe_idx)
+{
+	cq->cqec.cqe = get_cqe(cq, cqe_idx & cq->ibv_cq.cqe);
+	cq->cqec.cqe_minis =
+		(struct mlx5_mini_cqe8 *)get_cqe(cq, (cqe_idx + 1) & cq->ibv_cq.cqe);
+	cq->cqec.cqe_cnt = ntohl(cq->cqec.cqe->byte_cnt);
+	cq->cqec.wqe_cnt = ntohs(cq->cqec.cqe->wqe_counter);
+	cq->cqec.cqe_idx = cqe_idx;
+	cq->cqec.cqe_cons = 0;
+	cq->cqec.cqe_is_req = is_requestor(cq->cqec.cqe->op_own >> 4);
+
+	mlx5_uncompress_cqe_next(cq);
+}
+
+static inline struct mlx5_cqe64* mlx5_uncompress_cqe_next(struct mlx5_cq *cq)
+{
+	if (!cq->cqec.cqe)
+		return NULL;
+
+	if (cq->cqec.cqe_cons < cq->cqec.cqe_cnt) {
+		struct mlx5_mini_cqe8 *mc;
+		struct mlx5_cqe64 *cqe;
+		int log_size = cq->cq_log_size;
+		uint8_t opown = cq->cqec.cqe->op_own & 0xf2;
+
+		if (cq->cqec.cqe_cons == 8) {
+			cq->cqec.cqe_cnt -= 8;
+			cq->cqec.cqe_cons = 0;
+			cq->cqec.cqe_minis = get_cqe(cq, cq->cqec.cqe_idx & cq->ibv_cq.cqe);
+		}
+
+		/* Change the own bit in CQE. */
+		cqe = get_cqe(cq, (cq->cqec.cqe_idx) & cq->ibv_cq.cqe);
+		cqe->op_own = opown | ((cq->cqec.cqe_idx >> log_size) & 1);
+
+		/* Copy useful fields from mini CQE to CQE. */
+		mc = &cq->cqec.cqe_minis[cq->cqec.cqe_cons];
+		cq->cqec.cqe->byte_cnt = mc->byte_cnt;
+
+		if (cq->cqec.cqe_is_req) {
+			cq->cqec.cqe->wqe_counter = mc->s_wqe_info.wqe_counter;
+			cq->cqec.cqe->sop_qpn.sop = mc->s_wqe_info.s_wqe_opcode;
+		} else {
+			/* for now we are supporting only rx_hash_res not checksum */
+			cq->cqec.cqe->rx_hash_res = mc->rx_hash_result;
+			cq->cqec.cqe->wqe_counter = htons(cq->cqec.wqe_cnt);
+			++cq->cqec.wqe_cnt;
+		}
+
+		++cq->cqec.cqe_cons;
+		++cq->cqec.cqe_idx;
+	} else {
+		cq->cons_index = cq->cqec.cqe_idx;
+		cq->cqec.cqe = NULL;
+	}
+
+	return cq->cqec.cqe;
+}
+
 static inline int32_t mlx5_poll_length_flags_no_update(struct ibv_cq *ibcq,
 						      const int cqe_sz,
 						      uint32_t *flags,
@@ -1720,32 +1784,38 @@ static inline int32_t mlx5_poll_length_flags_no_update(struct ibv_cq *ibcq,
 	struct mlx5_resource *cur_rsc = NULL;
 	struct mlx5_cqe64 *cqe64;
 	int32_t size = 0;
-	int cqe_format;
 
-	cqe64 = get_next_cqe(cq, cqe_sz);
+	cqe64 = mlx5_uncompress_cqe_next(cq);
+	if (!cqe64) {
+		int cqe_format = 0;
 
-	if (cqe64) {
-		cqe_format = mlx5_get_cqe_format(cqe64);
-		if (unlikely(cqe_format == MLX5_COMPRESSED)) {
-			mlx5_decompress_cqe(cq);
-			cqe_format = 0;
-		}
+		cqe64 = get_next_cqe(cq, cqe_sz);
+		if (!cqe64)
+			return 0;
 
 		if (unlikely((cqe64->op_own >> 4) != MLX5_CQE_RESP_SEND))
 			return -1;
-		cur_rsc = find_rsc(cq, cqe64, cqe_ver);
-		if (unlikely(!cur_rsc))
-			return -1;
 
-		size = poll_length_rwq(cur_rsc, cqe64, flags, cqe_format, NULL, NULL);
-		/* if CVLAN stripping is enabled, check the CQE CV bit */
-		if (vlan_cti && (cqe64->l4_hdr_type_etc & 0x1)) {
-			*vlan_cti = ntohs(cqe64->vlan_info);
-			*flags |= IBV_EXP_CQ_RX_CVLAN_STRIPPED_V1;
-		}
-
-		++cq->cons_index;
+		cqe_format = mlx5_get_cqe_format(cqe64);
+		if (unlikely(cqe_format == MLX5_COMPRESSED))
+			mlx5_uncompress_cqe(cq, cq->cons_index);
 	}
+
+	cur_rsc = find_rsc(cq, cqe64, cqe_ver);
+	if (unlikely(!cur_rsc))
+		return -1;
+
+	size = poll_length_rwq(cur_rsc, cqe64, flags, 0, NULL, NULL);
+	/* if CVLAN stripping is enabled, check the CQE CV bit */
+	if (vlan_cti && (cqe64->l4_hdr_type_etc & 0x1)) {
+		*vlan_cti = ntohs(cqe64->vlan_info);
+		*flags |= IBV_EXP_CQ_RX_CVLAN_STRIPPED_V1;
+	}
+
+	/* Only increase the consumed CQE if it was not compressed.
+	 * Otherwise, the uncompress algorithm manage it. */
+	if (!cq->cqec.cqe)
+		++cq->cons_index;
 
 	return size;
 }
