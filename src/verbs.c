@@ -2115,6 +2115,24 @@ struct ibv_exp_wq *mlx5_exp_create_wq(struct ibv_context *context,
 	rwq->rsc.rsn =  cmd.drv.user_index;
 	cq->wq = rwq;
 
+	/* Fill ring descriptors. */
+	if (attr->comp_mask & IBV_EXP_CREATE_WQ_BUFS_INIT) {
+		struct mlx5_wqe_data_seg *scat;
+		unsigned int ind;
+		int i;
+
+		ind = 0;
+		for (i = 0; i < attr->max_recv_wr; ++i) {
+			scat = (struct mlx5_wqe_data_seg *)
+				((uintptr_t)rwq->rq.buff + (ind << rwq->rq.wqe_shift));
+			scat->byte_count = htonl(attr->bufs_length);
+			scat->lkey       = htonl(attr->bufs_mkey);
+
+			ind = (ind + 1) & (rwq->rq.wqe_cnt - 1);
+		}
+		rwq->rq.head += attr->max_recv_sge;
+	}
+
 	return &rwq->wq;
 
 err_create:
@@ -3380,10 +3398,18 @@ void *mlx5_exp_query_intf(struct ibv_context *context, struct ibv_exp_query_intf
 	case IBV_EXP_INTF_WQ:
 		rwq = to_mrwq(params->obj);
 		if (rwq->pattern == MLX5_WQ_PATTERN) {
-			family = mlx5_get_wq_family(rwq, params, status);
-			if (*status != IBV_EXP_INTF_STAT_OK) {
-				fprintf(stderr, PFX "Failed to get WQ family\n");
-				errno = EINVAL;
+			if (params->intf_version == 0) {
+				family = mlx5_get_wq_family(rwq, params, status);
+				if (*status != IBV_EXP_INTF_STAT_OK) {
+					fprintf(stderr, PFX "Failed to get WQ family\n");
+					errno = EINVAL;
+				}
+			} else {
+				family = mlx5_get_wq_family_v1(rwq, params, status);
+				if (*status != IBV_EXP_INTF_STAT_OK) {
+					fprintf(stderr, PFX "Failed to get WQ family\n");
+					errno = EINVAL;
+				}
 			}
 		} else {
 			fprintf(stderr, PFX "Warning: non-valid WQ passed to query interface\n");

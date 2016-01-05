@@ -132,7 +132,7 @@
 enum {
 	MLX5_MAX_CQ_FAMILY_VER		= 1,
 	MLX5_MAX_QP_BURST_FAMILY_VER	= 0,
-	MLX5_MAX_WQ_FAMILY_VER		= 0
+	MLX5_MAX_WQ_FAMILY_VER		= 1
 };
 
 enum {
@@ -1179,6 +1179,10 @@ struct ibv_exp_qp_burst_family *mlx5_get_qp_burst_family(struct mlx5_qp *qp,
 struct ibv_exp_wq_family *mlx5_get_wq_family(struct mlx5_rwq *rwq,
 					     struct ibv_exp_query_intf_params *params,
 					     enum ibv_exp_query_intf_status *status);
+struct ibv_exp_wq_family_v1 *mlx5_get_wq_family_v1(struct mlx5_rwq *rwq,
+						   struct ibv_exp_query_intf_params *params,
+						   enum ibv_exp_query_intf_status *status);
+
 struct ibv_exp_cq_family_v1 *mlx5_get_poll_cq_family(struct mlx5_cq *cq,
 						     struct ibv_exp_query_intf_params *params,
 						     enum ibv_exp_query_intf_status *status);

@@ -2554,6 +2554,31 @@ static int mlx5_recv_burst_safe(struct ibv_qp *ibqp, struct ibv_sge *sg_list, ui
 MLX5_RECV_BURST_UNSAFE(0);
 MLX5_RECV_BURST_UNSAFE(1);
 
+static inline int mlx5_recv_pending(struct ibv_exp_wq *, uintptr_t);
+static inline int mlx5_recv_pending(struct ibv_exp_wq *ibwq, uintptr_t addr)
+{
+       unsigned int ind;
+       struct mlx5_wqe_data_seg *scat;
+       struct mlx5_rwq *rwq = to_mrwq(ibwq);
+       struct mlx5_wq *rq = &rwq->rq;
+
+       ind = rq->head & (rq->wqe_cnt - 1);
+       scat = get_recv_wqe(rq, ind);
+       scat->addr = htonll(addr);
+       ++rq->head;
+
+       return 0;
+}
+
+static inline void mlx5_recv_flush(struct ibv_exp_wq *);
+static inline void mlx5_recv_flush(struct ibv_exp_wq *ibwq)
+{
+       struct mlx5_rwq *rwq = to_mrwq(ibwq);
+       struct mlx5_wq *rq = &rwq->rq;
+
+       *rq->db = htonl(rq->head & 0xffff);
+}
+
 /*
  * qp_burst family implementation for safe QP
  */
@@ -2760,6 +2785,16 @@ struct ibv_exp_wq_family mlx5_wq_family_safe = {
 };
 
 /*
+ * wq family implementation for safe WQ
+ */
+struct ibv_exp_wq_family_v1 mlx5_wq_family_v1 = {
+	.recv_sg_list	= mlx5_wq_recv_sg_list_safe,
+	.recv_burst	= mlx5_wq_recv_burst_safe,
+	.recv_pending   = mlx5_recv_pending,
+	.recv_flush     = mlx5_recv_flush,
+};
+
+/*
  * wq family implementation table for unsafe WQ
  *
  * Each table entry contains an implementation of the ibv_exp_wq_family
@@ -2823,3 +2858,30 @@ struct ibv_exp_wq_family *mlx5_get_wq_family(struct mlx5_rwq *rwq,
 	return family;
 }
 
+struct ibv_exp_wq_family_v1 *mlx5_get_wq_family_v1(struct mlx5_rwq *rwq,
+						   struct ibv_exp_query_intf_params *params,
+						   enum ibv_exp_query_intf_status *status)
+{
+	if (params->intf_version > 1) {
+		*status = IBV_EXP_INTF_STAT_VERSION_NOT_SUPPORTED;
+
+		return NULL;
+	}
+
+	if (params->flags) {
+		fprintf(stderr, PFX "Global interface flags(0x%x) are not supported for WQ family\n", params->flags);
+		*status = IBV_EXP_INTF_STAT_FLAGS_NOT_SUPPORTED;
+
+		return NULL;
+	}
+	if (params->family_flags) {
+		fprintf(stderr, PFX "Family flags(0x%x) are not supported for WQ family\n", params->family_flags);
+		*status = IBV_EXP_INTF_STAT_FAMILY_FLAGS_NOT_SUPPORTED;
+
+		return NULL;
+	}
+
+	*status = IBV_EXP_INTF_STAT_OK;
+
+	return &mlx5_wq_family_v1;
+}
