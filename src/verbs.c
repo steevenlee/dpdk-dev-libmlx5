@@ -2018,11 +2018,14 @@ struct ibv_exp_wq *mlx5_exp_create_wq(struct ibv_context *context,
 	int thread_safe = !mlx5_single_threaded;
 	struct ibv_exp_device_attr device_attr;
 	enum mlx5_rsc_type	rsc_type;
+	struct mlx5_cq *cq = to_mcq(attr->cq);
 #ifdef MLX5_DEBUG
 	FILE *fp = ctx->dbg_fp;
 #endif
 
 	if (attr->wq_type != IBV_EXP_WQT_RQ)
+		return NULL;
+	if (cq->wq)
 		return NULL;
 
 	memset(&cmd, 0, sizeof(cmd));
@@ -2110,6 +2113,7 @@ struct ibv_exp_wq *mlx5_exp_create_wq(struct ibv_context *context,
 
 	rwq->rsc.type = rsc_type;
 	rwq->rsc.rsn =  cmd.drv.user_index;
+	cq->wq = rwq;
 
 	return &rwq->wq;
 

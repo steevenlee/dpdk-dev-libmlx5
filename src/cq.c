@@ -1672,13 +1672,142 @@ int32_t mlx5_poll_length_flags_mp_rq_cvlan_unsafe_cqe128_v1(struct ibv_cq *cq, u
 	return poll_length(cq, NULL, NULL, 0, 128, offset, flags, 1, vlan_cti);
 }
 
+static inline void poll_db(struct ibv_cq *ibcq) __attribute__((always_inline));
+static inline void poll_db(struct ibv_cq *ibcq)
+{
+       mlx5_update_cons_index(to_mcq(ibcq));
+}
+
+static int32_t poll_length_rwq(struct mlx5_resource *cur_rsc, struct mlx5_cqe64 *cqe64,
+			       uint32_t *flags, const int cqe_format, void *buf,
+			       uint32_t *inl)
+{
+	struct mlx5_rwq *rwq;
+	int32_t size = 0;
+
+	rwq = (struct mlx5_rwq *)cur_rsc;
+	if (flags && rwq->model_flags & MLX5_WQ_MODEL_RX_CSUM_IP_OK_IP_NON_TCP_UDP)
+		*flags = get_rx_offloads_flags(cqe64);
+
+	if (unlikely(cqe_format)) {
+		void *data = (cqe_format == MLX5_INLINE_DATA32_SEG) ? cqe64 : cqe64 - 1;
+
+		if (buf) {
+			*inl = 1;
+			memcpy(buf, data, size);
+		} else
+			return -1;
+	}
+
+	size = ntohl(cqe64->byte_cnt);
+	++rwq->rq.tail;
+
+	return size;
+}
+
+static inline int32_t mlx5_poll_length_flags_no_update(struct ibv_cq *ibcq,
+						      const int cqe_sz,
+						      uint32_t *flags,
+						      const int cqe_ver,
+						      uint16_t *vlan_cti) __attribute__((always_inline));
+static inline int32_t mlx5_poll_length_flags_no_update(struct ibv_cq *ibcq,
+						      const int cqe_sz,
+						      uint32_t *flags,
+						      const int cqe_ver,
+						      uint16_t *vlan_cti)
+{
+	struct mlx5_cq *cq = to_mcq(ibcq);
+	struct mlx5_resource *cur_rsc = NULL;
+	struct mlx5_cqe64 *cqe64;
+	int32_t size = 0;
+	int cqe_format;
+
+	cqe64 = get_next_cqe(cq, cqe_sz);
+
+	if (cqe64) {
+		cqe_format = mlx5_get_cqe_format(cqe64);
+		if (unlikely(cqe_format == MLX5_COMPRESSED)) {
+			mlx5_decompress_cqe(cq);
+			cqe_format = 0;
+		}
+
+		if (unlikely((cqe64->op_own >> 4) != MLX5_CQE_RESP_SEND))
+			return -1;
+		cur_rsc = find_rsc(cq, cqe64, cqe_ver);
+		if (unlikely(!cur_rsc))
+			return -1;
+
+		size = poll_length_rwq(cur_rsc, cqe64, flags, cqe_format, NULL, NULL);
+		/* if CVLAN stripping is enabled, check the CQE CV bit */
+		if (vlan_cti && (cqe64->l4_hdr_type_etc & 0x1)) {
+			*vlan_cti = ntohs(cqe64->vlan_info);
+			*flags |= IBV_EXP_CQ_RX_CVLAN_STRIPPED_V1;
+		}
+
+		++cq->cons_index;
+	}
+
+	return size;
+}
+
+int32_t mlx5_poll_length_flags_no_update_cqe64(struct ibv_cq *cq, uint32_t *flags) __MLX5_ALGN_F__;
+int32_t mlx5_poll_length_flags_no_update_cqe64(struct ibv_cq *cq, uint32_t *flags)
+{
+	return mlx5_poll_length_flags_no_update(cq, 64, flags, 0, NULL);
+}
+
+int32_t mlx5_poll_length_flags_no_update_cvlan_cqe64(struct ibv_cq *cq, uint32_t *flags, uint16_t *vlan_cti) __MLX5_ALGN_F__;
+int32_t mlx5_poll_length_flags_no_update_cvlan_cqe64(struct ibv_cq *cq, uint32_t *flags, uint16_t *vlan_cti)
+{
+	return mlx5_poll_length_flags_no_update(cq, 64, flags, 0, vlan_cti);
+}
+
+int32_t mlx5_poll_length_flags_no_update_cqe128(struct ibv_cq *cq, uint32_t *flags) __MLX5_ALGN_F__;
+int32_t mlx5_poll_length_flags_no_update_cqe128(struct ibv_cq *cq, uint32_t *flags)
+{
+	return mlx5_poll_length_flags_no_update(cq, 128, flags, 0, NULL);
+}
+
+int32_t mlx5_poll_length_flags_no_update_cvlan_cqe128(struct ibv_cq *cq, uint32_t *flags, uint16_t *vlan_cti) __MLX5_ALGN_F__;
+int32_t mlx5_poll_length_flags_no_update_cvlan_cqe128(struct ibv_cq *cq, uint32_t *flags, uint16_t *vlan_cti)
+{
+	return mlx5_poll_length_flags_no_update(cq, 124, flags, 0, vlan_cti);
+}
+
+int32_t mlx5_poll_length_flags_no_update_cqe64_v1(struct ibv_cq *cq, uint32_t *flags) __MLX5_ALGN_F__;
+int32_t mlx5_poll_length_flags_no_update_cqe64_v1(struct ibv_cq *cq, uint32_t *flags)
+{
+	return mlx5_poll_length_flags_no_update(cq, 64, flags, 1, NULL);
+}
+
+int32_t mlx5_poll_length_flags_no_update_cvlan_cqe64_v1(struct ibv_cq *cq, uint32_t *flags, uint16_t *vlan_cti) __MLX5_ALGN_F__;
+int32_t mlx5_poll_length_flags_no_update_cvlan_cqe64_v1(struct ibv_cq *cq, uint32_t *flags, uint16_t *vlan_cti)
+{
+	return mlx5_poll_length_flags_no_update(cq, 64, flags, 1, vlan_cti);
+}
+
+int32_t mlx5_poll_length_flags_no_update_cqe128_v1(struct ibv_cq *cq, uint32_t *flags) __MLX5_ALGN_F__;
+int32_t mlx5_poll_length_flags_no_update_cqe128_v1(struct ibv_cq *cq, uint32_t *flags)
+{
+	return mlx5_poll_length_flags_no_update(cq, 128, flags, 1, NULL);
+}
+
+int32_t mlx5_poll_length_flags_no_update_cvlan_cqe128_v1(struct ibv_cq *cq, uint32_t *flags, uint16_t *vlan_cti) __MLX5_ALGN_F__;
+int32_t mlx5_poll_length_flags_no_update_cvlan_cqe128_v1(struct ibv_cq *cq, uint32_t *flags, uint16_t *vlan_cti)
+{
+	return mlx5_poll_length_flags_no_update(cq, 128, flags, 1, vlan_cti);
+}
+
 static struct ibv_exp_cq_family_v1 mlx5_poll_cq_family_safe = {
 	.poll_cnt = mlx5_poll_cnt_safe,
 	.poll_length = mlx5_poll_length_safe,
 	.poll_length_flags = mlx5_poll_length_flags_safe,
 	.poll_length_flags_mp_rq = mlx5_poll_length_flags_mp_rq_safe,
 	.poll_length_flags_cvlan = mlx5_poll_length_flags_cvlan_safe,
-	.poll_length_flags_mp_rq_cvlan = mlx5_poll_length_flags_mp_rq_cvlan_safe
+	.poll_length_flags_mp_rq_cvlan = mlx5_poll_length_flags_mp_rq_cvlan_safe,
+	.poll_length_no_update = NULL,
+	.poll_length_cvlan_no_update = NULL,
+	.update_cq = NULL,
 };
 
 enum mlx5_poll_cq_cqe_sizes {
@@ -1694,8 +1823,10 @@ static struct ibv_exp_cq_family_v1 mlx5_poll_cq_family_unsafe_tbl[MLX5_POLL_CQ_N
 				.poll_length_flags = mlx5_poll_length_flags_unsafe_cqe64,
 				.poll_length_flags_mp_rq = mlx5_poll_length_flags_mp_rq_unsafe_cqe64,
 				.poll_length_flags_cvlan = mlx5_poll_length_flags_cvlan_unsafe_cqe64,
-				.poll_length_flags_mp_rq_cvlan = mlx5_poll_length_flags_mp_rq_cvlan_unsafe_cqe64
-
+				.poll_length_flags_mp_rq_cvlan = mlx5_poll_length_flags_mp_rq_cvlan_unsafe_cqe64,
+				.poll_length_no_update = mlx5_poll_length_flags_no_update_cqe64,
+				.poll_length_cvlan_no_update = mlx5_poll_length_flags_no_update_cvlan_cqe64,
+				.update_cq = poll_db,
 		},
 		[MLX5_POLL_CQ_CQE_128] = {
 				.poll_cnt = mlx5_poll_cnt_unsafe_cqe128,
@@ -1703,8 +1834,10 @@ static struct ibv_exp_cq_family_v1 mlx5_poll_cq_family_unsafe_tbl[MLX5_POLL_CQ_N
 				.poll_length_flags = mlx5_poll_length_flags_unsafe_cqe128,
 				.poll_length_flags_mp_rq = mlx5_poll_length_flags_mp_rq_unsafe_cqe128,
 				.poll_length_flags_cvlan = mlx5_poll_length_flags_cvlan_unsafe_cqe128,
-				.poll_length_flags_mp_rq_cvlan = mlx5_poll_length_flags_mp_rq_cvlan_unsafe_cqe128
-
+				.poll_length_flags_mp_rq_cvlan = mlx5_poll_length_flags_mp_rq_cvlan_unsafe_cqe128,
+				.poll_length_no_update = mlx5_poll_length_flags_no_update_cqe128,
+				.poll_length_cvlan_no_update = mlx5_poll_length_flags_no_update_cvlan_cqe128,
+				.update_cq = poll_db,
 		},
 };
 
@@ -1715,7 +1848,10 @@ static struct ibv_exp_cq_family_v1 mlx5_poll_cq_family_unsafe_v1_tbl[MLX5_POLL_C
 				.poll_length_flags = mlx5_poll_length_flags_unsafe_cqe64_v1,
 				.poll_length_flags_mp_rq = mlx5_poll_length_flags_mp_rq_unsafe_cqe64_v1,
 				.poll_length_flags_cvlan = mlx5_poll_length_flags_cvlan_unsafe_cqe64_v1,
-				.poll_length_flags_mp_rq_cvlan = mlx5_poll_length_flags_mp_rq_cvlan_unsafe_cqe64_v1
+				.poll_length_flags_mp_rq_cvlan = mlx5_poll_length_flags_mp_rq_cvlan_unsafe_cqe64_v1,
+				.poll_length_no_update = mlx5_poll_length_flags_no_update_cqe64_v1,
+				.poll_length_cvlan_no_update = mlx5_poll_length_flags_no_update_cvlan_cqe64_v1,
+				.update_cq = poll_db,
 		},
 		[MLX5_POLL_CQ_CQE_128] = {
 				.poll_cnt = mlx5_poll_cnt_unsafe_cqe128_v1,
@@ -1723,7 +1859,10 @@ static struct ibv_exp_cq_family_v1 mlx5_poll_cq_family_unsafe_v1_tbl[MLX5_POLL_C
 				.poll_length_flags = mlx5_poll_length_flags_unsafe_cqe128_v1,
 				.poll_length_flags_mp_rq = mlx5_poll_length_flags_mp_rq_unsafe_cqe128_v1,
 				.poll_length_flags_cvlan = mlx5_poll_length_flags_cvlan_unsafe_cqe128_v1,
-				.poll_length_flags_mp_rq_cvlan = mlx5_poll_length_flags_mp_rq_cvlan_unsafe_cqe128_v1
+				.poll_length_flags_mp_rq_cvlan = mlx5_poll_length_flags_mp_rq_cvlan_unsafe_cqe128_v1,
+				.poll_length_no_update = mlx5_poll_length_flags_no_update_cqe128_v1,
+				.poll_length_cvlan_no_update = mlx5_poll_length_flags_no_update_cvlan_cqe128_v1,
+				.update_cq = poll_db,
 		},
 };
 

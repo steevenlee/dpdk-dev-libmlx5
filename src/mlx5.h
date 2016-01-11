@@ -556,6 +556,7 @@ struct mlx5_cq {
 	uint8_t				model_flags; /* use mlx5_cq_model_flags */
 	uint16_t			cqe_comp_max_num;
 	uint8_t				cq_log_size;
+	void				*wq; /* set if in use by a wq. */
 };
 
 struct mlx5_srq {
