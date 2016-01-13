@@ -98,9 +98,10 @@
 
 #define MLX5_GCC_VERSION (__GNUC__ * 100 + __GNUC_MINOR__)
 
+#define MLX5_D_F_ALGN_SIZE (64)
 #if MLX5_GCC_VERSION >= 403
-#	define __MLX5_ALGN_F__ __attribute__((noinline, aligned(64)))
-#	define __MLX5_ALGN_D__ __attribute__((aligned(64)))
+#	define __MLX5_ALGN_F__ __attribute__((noinline, aligned(MLX5_D_F_ALGN_SIZE)))
+#	define __MLX5_ALGN_D__ __attribute__((aligned(MLX5_D_F_ALGN_SIZE)))
 #else
 #	define __MLX5_ALGN_F__
 #	define __MLX5_ALGN_D__
@@ -296,6 +297,10 @@ enum mlx5_alloc_type {
 enum mlx5_mr_type {
 	MLX5_NORMAL_MR	= 0x0,
 	MLX5_ODP_MR	= 0x1,
+};
+
+enum {
+	MLX5_UMR_CTRL_INLINE	= 1 << 7,
 };
 
 struct mlx5_device {
@@ -519,7 +524,7 @@ struct mlx5_cq {
 	uint32_t			cons_index;
 	uint32_t                        wait_index;
 	uint32_t                        wait_count;
-	uint32_t		       *dbrec;
+	volatile uint32_t	       *dbrec;
 	int				arm_sn;
 	int				cqe_sz;
 	int				resize_cqe_sz;
@@ -545,7 +550,7 @@ struct mlx5_srq {
 	int				wqe_shift;
 	int				head;
 	int				tail;
-	uint32_t		       *db;
+	volatile uint32_t	       *db;
 	uint16_t			counter;
 	int				wq_sig;
 	struct ibv_srq_legacy *ibv_srq_legacy;
@@ -568,7 +573,7 @@ struct mlx5_wq {
 	struct mlx5_lock		lock;
 	/* post_recv hot data */
 	void			       *buff;
-	uint32_t		       *db;
+	volatile uint32_t	       *db;
 	int				wqe_shift;
 	int				offset;
 };
@@ -627,7 +632,7 @@ struct general_data_hot {
 						 void *seg, int *total_size);
 	void			*sqstart;
 	void			*sqend;
-	uint32_t		*db;
+	volatile uint32_t	*db;
 	struct mlx5_bf		*bf;
 	uint32_t		 scur_post;
 	/* Used for burst_family interface, keeps the last posted wqe */
@@ -759,7 +764,7 @@ struct mlx5_rwq {
 	int buf_size;
 	/* hot data used on data path */
 	struct mlx5_wq rq __MLX5_ALGN_D__;
-	uint32_t *db;
+	volatile uint32_t *db;
 	/* Multi-Packet RQ hot data */
 	/* Table to hold the consumed strides on each WQE */
 	uint32_t *consumed_strides_counter;
@@ -832,6 +837,22 @@ extern int mlx5_stall_cq_inc_step;
 extern int mlx5_stall_cq_dec_step;
 extern int mlx5_single_threaded;
 extern int mlx5_use_mutex;
+
+#ifdef MLX5_DEBUG
+void dump_wqe(FILE *fp, int idx, int size_16, struct mlx5_qp *qp);
+#endif
+
+static inline void *aligned_calloc(size_t size)
+{
+	void *p;
+
+	if (posix_memalign(&p, MLX5_D_F_ALGN_SIZE, size))
+		return NULL;
+
+	memset(p, 0, size);
+
+	return p;
+}
 
 static inline unsigned DIV_ROUND_UP(unsigned n, unsigned d)
 {
@@ -955,7 +976,7 @@ void mlx5_get_alloc_type(struct ibv_context *context,
 int mlx5_use_huge(struct ibv_context *context, const char *key);
 
 uint32_t *mlx5_alloc_dbrec(struct mlx5_context *context);
-void mlx5_free_db(struct mlx5_context *context, uint32_t *db);
+void mlx5_free_db(struct mlx5_context *context, volatile uint32_t *db);
 
 int mlx5_prefetch_mr(struct ibv_mr *mr, struct ibv_exp_prefetch_attr *attr);
 
@@ -1287,6 +1308,21 @@ static inline uint8_t calc_xor(void *wqe, int size)
 static inline void mlx5_update_cons_index(struct mlx5_cq *cq)
 {
 	cq->dbrec[MLX5_CQ_SET_CI] = htonl(cq->cons_index & 0xffffff);
+}
+
+static inline void set_ctrl_seg(uint32_t *start, struct ctrl_seg_data *ctrl_seg,
+				uint8_t opcode, uint16_t idx, uint8_t opmod,
+				uint8_t size, uint8_t fm_ce_se, uint32_t imm_invk_umrk)
+{
+	*start++ = htonl(opmod << 24 | idx << 8 | opcode);
+	*start++ = htonl(ctrl_seg->qp_num << 8 | (size & 0x3F));
+	*start++ = htonl(fm_ce_se);
+	*start = imm_invk_umrk;
+}
+
+static inline void *mlx5_get_send_wqe(struct mlx5_qp *qp, int n)
+{
+	return qp->gen_data.sqstart + (n << MLX5_SEND_WQE_SHIFT);
 }
 
 #endif /* MLX5_H */

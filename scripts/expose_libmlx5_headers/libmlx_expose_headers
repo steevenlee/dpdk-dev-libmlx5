@@ -182,7 +182,7 @@ function add_qp_info_struct {
 cat <<EOF >> $output_file
 struct ibv_mlx5_qp_info {
 	uint32_t	qpn;
-	uint32_t	*dbrec;
+	volatile uint32_t	*dbrec;
 	struct {
 		void		*buf;
 		unsigned	wqe_cnt;
@@ -235,7 +235,7 @@ struct ibv_mlx5_cq_info {
 	uint32_t	cqn;
 	unsigned	cqe_cnt;
 	void		*buf;
-	uint32_t	*dbrec;
+	volatile uint32_t	*dbrec;
 	unsigned	cqe_size;
 };
 
@@ -268,7 +268,7 @@ function add_srq_info_struct {
 cat <<EOF >> $output_file
 struct ibv_mlx5_srq_info {
 	void		*buf;
-	uint32_t	*dbrec;
+	volatile uint32_t	*dbrec;
 	unsigned	stride;
 	unsigned	head;
 	unsigned	tail;
