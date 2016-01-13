@@ -117,7 +117,7 @@ out:
 	return db;
 }
 
-void mlx5_free_db(struct mlx5_context *context, uint32_t *db)
+void mlx5_free_db(struct mlx5_context *context, volatile uint32_t *db)
 {
 	struct mlx5_db_page *page;
 	uintptr_t ps = to_mdev(context->ibv_ctx.device)->page_size;

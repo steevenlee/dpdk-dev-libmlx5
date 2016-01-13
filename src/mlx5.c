@@ -51,6 +51,7 @@
 
 #include "mlx5.h"
 #include "mlx5-abi.h"
+#include "ec.h"
 
 #ifndef PCI_VENDOR_ID_MELLANOX
 #define PCI_VENDOR_ID_MELLANOX			0x15b3
@@ -622,6 +623,13 @@ static void set_experimental(struct ibv_context *ctx)
 	verbs_set_exp_ctx_op(verbs_exp_ctx, drv_exp_query_port, mlx5_exp_query_port);
 	verbs_set_exp_ctx_op(verbs_exp_ctx, drv_exp_ibv_create_ah, mlx5_exp_create_ah);
 	verbs_set_exp_ctx_op(verbs_exp_ctx, drv_exp_query_values, mlx5_exp_query_values);
+	verbs_set_exp_ctx_op(verbs_exp_ctx, alloc_ec_calc, mlx5_alloc_ec_calc);
+	verbs_set_exp_ctx_op(verbs_exp_ctx, dealloc_ec_calc, mlx5_dealloc_ec_calc);
+	verbs_set_exp_ctx_op(verbs_exp_ctx, ec_encode_async, mlx5_ec_encode_async);
+	verbs_set_exp_ctx_op(verbs_exp_ctx, ec_encode_sync, mlx5_ec_encode_sync);
+	verbs_set_exp_ctx_op(verbs_exp_ctx, ec_decode_async, mlx5_ec_decode_async);
+	verbs_set_exp_ctx_op(verbs_exp_ctx, ec_decode_sync, mlx5_ec_decode_sync);
+	verbs_set_exp_ctx_op(verbs_exp_ctx, ec_poll, mlx5_ec_poll);
 	if (mctx->cqe_version == 1)
 		verbs_set_exp_ctx_op(verbs_exp_ctx, drv_exp_ibv_poll_cq,
 				     mlx5_poll_cq_ex_1);

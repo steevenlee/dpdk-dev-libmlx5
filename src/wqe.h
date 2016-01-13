@@ -229,6 +229,12 @@ struct mlx5_seg_check_psv {
 	uint32_t	psv_index[4];
 };
 
+struct mlx5_klm {
+	uint32_t	byte_count;
+	uint32_t	key;
+	uint64_t	va;
+};
+
 struct mlx5_seg_repeat_ent {
 	uint16_t	stride;
 	uint16_t	byte_count;
@@ -293,6 +299,33 @@ enum {
 	MLX5_PERM_REMOTE_WRITE	= 1 << 5,
 	MLX5_PERM_ATOMIC	= 1 << 6,
 	MLX5_PERM_UMR_EN	= 1 << 7,
+};
+
+enum {
+	MLX5_ACCESS_MODE_KLM	= 2,
+};
+
+enum {
+	MLX5_CALC_OP_XOR = 0x5,
+};
+
+enum {
+	MLX5_CALC_MATRIX = (1 << 7),
+};
+
+struct mlx5_vec_calc_seg {
+	uint8_t		calc_op[4];
+	uint32_t	rsvd1[2];
+	uint8_t		op_tags;
+	uint8_t		mat_le_tag_cs;
+	uint8_t		rsvd2;
+	uint8_t		vec_count;
+	uint32_t	rsvd3;
+	uint32_t	cm_lkey;
+	uint64_t	cm_addr;
+	uint32_t	vec_size;
+	uint32_t	vec_lkey;
+	uint64_t	vec_addr;
 };
 
 #endif /* WQE_H */

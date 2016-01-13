@@ -691,7 +691,6 @@ static inline int mlx5_poll_one(struct mlx5_cq *cq,
 		mlx5_decompress_cqe(cq);
 		timestamp_en = 0;
 	}
-
 	++cq->cons_index;
 
 	/*
@@ -797,12 +796,12 @@ static inline int mlx5_poll_one(struct mlx5_cq *cq,
 		idx = wqe_ctr & (wq->wqe_cnt - 1);
 		handle_good_req((struct ibv_wc *)wc, cqe64);
 		if (cqe_format == MLX5_INLINE_DATA32_SEG) {
-			cqe = (cq->cqe_sz == 64) ? cqe64 : cqe64 - 1;
+			cqe = cqe64;
 			err = mlx5_copy_to_send_wqe(mqp, wqe_ctr, cqe,
 						    wc->byte_len);
 		} else if (cqe_format == MLX5_INLINE_DATA64_SEG) {
 			cqe = cqe64 - 1;
-			err = mlx5_copy_to_send_wqe(mqp, wqe_ctr, cqe - 1,
+			err = mlx5_copy_to_send_wqe(mqp, wqe_ctr, cqe,
 						    wc->byte_len);
 		} else {
 			err = 0;

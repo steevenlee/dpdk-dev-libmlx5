@@ -1648,9 +1648,9 @@ static struct ibv_qp *create_qp(struct ibv_context *context,
 		 (attrx->qp_type == IBV_QPT_RAW_ETH);
 
 	update_caps(context);
-	qp = calloc(1, sizeof(*qp));
+	qp = aligned_calloc(sizeof(*qp));
 	if (!qp) {
-		mlx5_dbg(fp, MLX5_DBG_QP, "\n");
+		mlx5_dbg(fp, MLX5_DBG_QP, "failed to allocate mlx5 qp\n");
 		return NULL;
 	}
 	ibqp = (struct ibv_qp *)&qp->verbs_qp;
@@ -2028,7 +2028,7 @@ struct ibv_exp_wq *mlx5_exp_create_wq(struct ibv_context *context,
 	memset(&cmd, 0, sizeof(cmd));
 	memset(&resp, 0, sizeof(resp));
 
-	rwq = calloc(1, sizeof(*rwq));
+	rwq = aligned_calloc(sizeof(*rwq));
 	if (!rwq)
 		return NULL;
 
@@ -2472,7 +2472,7 @@ int mlx5_modify_qp(struct ibv_qp *qp, struct ibv_qp_attr *attr,
 {
 	struct mlx5_qp *mqp = to_mqp(qp);
 	struct ibv_modify_qp cmd;
-	uint32_t *db;
+	volatile uint32_t *db;
 	int ret;
 
 	if (attr_mask & IBV_QP_PORT) {
@@ -2861,7 +2861,7 @@ struct ibv_qp *mlx5_open_qp(struct ibv_context *context,
 	int ret;
 	struct mlx5_context *ctx = to_mctx(context);
 
-	qp = calloc(1, sizeof(*qp));
+	qp = aligned_calloc(sizeof(*qp));
 	if (!qp)
 		return NULL;
 
@@ -2905,7 +2905,7 @@ int mlx5_modify_qp_ex(struct ibv_qp *qp, struct ibv_exp_qp_attr *attr,
 {
 	struct mlx5_qp *mqp = to_mqp(qp);
 	struct ibv_exp_modify_qp cmd;
-	uint32_t *db;
+	volatile uint32_t *db;
 	int ret;
 
 	if (attr_mask & IBV_QP_PORT) {
