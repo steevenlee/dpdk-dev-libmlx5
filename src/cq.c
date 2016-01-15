@@ -1478,7 +1478,7 @@ out:
 
        if (ctx->pkts_n)
 	       return ctx->pkts_len[--ctx->pkts_n];
-       return 0;
+       return 64;
 #endif /* MLX5_STUB */
 }
 
@@ -1844,7 +1844,7 @@ static inline int32_t mlx5_poll_length_flags_no_update(struct ibv_cq *ibcq,
 
        if (ctx->pkts_n)
 	       return ctx->pkts_len[--ctx->pkts_n];
-       return 0;
+       return 64;
 #endif /* MLX5_STUB */
 }
 
