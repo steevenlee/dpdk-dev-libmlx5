@@ -1276,11 +1276,7 @@ static inline int32_t poll_cnt(struct ibv_cq *ibcq, uint32_t max_entries,
 
 	return err == CQ_POLL_ERR ? -1 : npolled;
 #else /* MLX5_STUB */
-	struct mlx5_context *ctx = to_mctx(ibcq->context);
-	unsigned int n = ctx->pkts_tx_n;
-
-	ctx->pkts_tx_n = 0;
-	return n ? 2 : 0;
+	return 2;
 #endif /* MLX5_STUB */
 }
 
@@ -1474,10 +1470,6 @@ out:
 
 	return err == CQ_POLL_ERR ? -1 : size;
 #else /* MLX5_STUB */
-       struct mlx5_context *ctx = to_mctx(ibcq->context);
-
-       if (ctx->pkts_n)
-	       return ctx->pkts_len[--ctx->pkts_n];
        return 64;
 #endif /* MLX5_STUB */
 }
@@ -1840,10 +1832,6 @@ static inline int32_t mlx5_poll_length_flags_no_update(struct ibv_cq *ibcq,
 
 	return size;
 #else /* MLX5_STUB */
-       struct mlx5_context *ctx = to_mctx(ibcq->context);
-
-       if (ctx->pkts_n)
-	       return ctx->pkts_len[--ctx->pkts_n];
        return 64;
 #endif /* MLX5_STUB */
 }

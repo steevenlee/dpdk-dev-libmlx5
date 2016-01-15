@@ -2147,13 +2147,6 @@ static inline int send_pending(struct ibv_qp *ibqp, uint64_t addr,
 
 	if (thread_safe)
 		mlx5_unlock(&qp->sq.lock);
-#else /* MLX5_STUB */
-	struct mlx5_context *ctx;
-
-	ctx = to_mctx(ibqp->context);
-	ctx->pkts_len[ctx->pkts_n++] = length;
-	++ctx->pkts_tx_n;
-
 #endif /* MLX5_STUB */
 	return 0;
 }
