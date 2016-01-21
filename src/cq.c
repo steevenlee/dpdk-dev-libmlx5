@@ -1213,6 +1213,9 @@ static inline int32_t poll_cnt(struct ibv_cq *ibcq, uint32_t max_entries,
 	int err = CQ_OK;
 	uint16_t wqe_ctr;
 	int npolled;
+#ifdef MLX5_DEBUG
+	FILE *fp = to_mctx(ibcq->context)->dbg_fp;
+#endif
 
 	if (unlikely(use_lock))
 		mlx5_lock(&cq->lock);
@@ -1230,7 +1233,7 @@ static inline int32_t poll_cnt(struct ibv_cq *ibcq, uint32_t max_entries,
 		cur_rsc = find_rsc(cq, cqe64, cqe_ver);
 		if (unlikely(!cur_rsc)) {
 			err = CQ_POLL_ERR;
-			fprintf(stderr, "Failed to find send QP on poll_cnt\n");
+			mlx5_dbg(fp, MLX5_DBG_CQ_CQE, "Failed to find send QP on poll_cnt\n");
 			break;
 		}
 		mqp = (struct mlx5_qp *)cur_rsc;
@@ -1242,9 +1245,9 @@ static inline int32_t poll_cnt(struct ibv_cq *ibcq, uint32_t max_entries,
 		} else {
 			err = CQ_POLL_ERR;
 			if ((cqe64->op_own >> 4) == MLX5_CQE_REQ_ERR)
-				fprintf(stderr, "MLX5_CQE_REQ_ERR received on poll_cnt\n");
+				mlx5_dbg(fp, MLX5_DBG_CQ_CQE, "MLX5_CQE_REQ_ERR received on poll_cnt\n");
 			else
-				fprintf(stderr, "Non requester message received on poll_cnt\n");
+				mlx5_dbg(fp, MLX5_DBG_CQ_CQE, "Non requester message received on poll_cnt\n");
 		}
 
 		if (unlikely(err != CQ_OK))
@@ -1297,6 +1300,9 @@ static inline int32_t poll_length(struct ibv_cq *ibcq, void *buf, uint32_t *inl,
 	uint16_t wqe_ctr;
 	int err = CQ_OK;
 	int cqe_format;
+#ifdef MLX5_DEBUG
+	FILE *fp = to_mctx(ibcq->context)->dbg_fp;
+#endif
 
 	if (unlikely(use_lock))
 		mlx5_lock(&cq->lock);
@@ -1312,18 +1318,20 @@ static inline int32_t poll_length(struct ibv_cq *ibcq, void *buf, uint32_t *inl,
 
 		if (unlikely((cqe64->op_own >> 4) != MLX5_CQE_RESP_SEND)) {
 			if (cqe64->op_own >> 4 == MLX5_CQE_RESP_ERR)
-				fprintf(stderr, "poll_length, CQE response error, syndrome=0x%x, vendor syndrome error=0x%x, HW syndrome 0x%x, HW syndrome type 0x%x\n",
-					((struct mlx5_err_cqe *)cqe64)->syndrome, ((struct mlx5_err_cqe *)cqe64)->vendor_err_synd,
-					((struct mlx5_err_cqe *)cqe64)->hw_err_synd, ((struct mlx5_err_cqe *)cqe64)->hw_synd_type);
+				mlx5_dbg(fp, MLX5_DBG_CQ_CQE, "poll_length, CQE response error, syndrome=0x%x, vendor syndrome error=0x%x, HW syndrome 0x%x, HW syndrome type 0x%x\n",
+					 ((struct mlx5_err_cqe *)cqe64)->syndrome,
+					 ((struct mlx5_err_cqe *)cqe64)->vendor_err_synd,
+					 ((struct mlx5_err_cqe *)cqe64)->hw_err_synd,
+					 ((struct mlx5_err_cqe *)cqe64)->hw_synd_type);
 			else
-				fprintf(stderr, "Only post-receive completion supported on poll_length, op=%u\n",
-					cqe64->op_own >> 4);
+				mlx5_dbg(fp, MLX5_DBG_CQ_CQE, "Only post-receive completion supported on poll_length, op=%u\n",
+					 cqe64->op_own >> 4);
 			err = CQ_POLL_ERR;
 			goto out;
 		}
 		cur_rsc = find_rsc(cq, cqe64, cqe_ver);
 		if (unlikely(!cur_rsc)) {
-			fprintf(stderr, "Failed to find QP resource on poll_length\n");
+			mlx5_dbg(fp, MLX5_DBG_CQ_CQE, "Failed to find QP resource on poll_length\n");
 			err = CQ_POLL_ERR;
 			goto out;
 		}
@@ -1333,8 +1341,7 @@ static inline int32_t poll_length(struct ibv_cq *ibcq, void *buf, uint32_t *inl,
 			uint16_t wqe_id;
 
 			if (unlikely(!offset)) {
-				fprintf(stderr, "Can't handle Multi-Packet RQ completion since"
-						" 'offset' output parameter is not provided\n");
+				mlx5_dbg(fp, MLX5_DBG_CQ_CQE, "Can't handle Multi-Packet RQ completion since 'offset' output parameter is not provided\n");
 				err = CQ_POLL_ERR;
 				goto out;
 			}
@@ -1385,7 +1392,7 @@ static inline int32_t poll_length(struct ibv_cq *ibcq, void *buf, uint32_t *inl,
 				if (likely(cur_rsc->type == MLX5_RSC_TYPE_RWQ)) {
 					rwq = (struct mlx5_rwq *)cur_rsc;
 				} else {
-					fprintf(stderr, "Invalid resource type(%d) on poll_length\n", cur_rsc->type);
+					mlx5_dbg(fp, MLX5_DBG_CQ_CQE, "Invalid resource type(%d) on poll_length\n", cur_rsc->type);
 					err = CQ_POLL_ERR;
 					goto out;
 				}
@@ -1408,7 +1415,7 @@ static inline int32_t poll_length(struct ibv_cq *ibcq, void *buf, uint32_t *inl,
 				} else {
 					wqe_ctr = mqp->rq.tail & (mqp->rq.wqe_cnt - 1);
 					if (unlikely(mlx5_copy_to_recv_wqe(mqp, wqe_ctr, data, size))) {
-						fprintf(stderr, "Fail to copy inline receive message to receive buffer\n");
+						mlx5_dbg(fp, MLX5_DBG_CQ_CQE, "Fail to copy inline receive message to receive buffer\n");
 						err = CQ_POLL_ERR;
 						goto out;
 					}

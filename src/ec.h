@@ -74,7 +74,7 @@ struct mlx5_ec_calc {
 	struct ibv_wc		wcs[EC_POLL_BATCH];
 	struct ibv_comp_channel *channel;
 	uint8_t			log_chunk_size;
-	uint64_t		cqe_count;
+	uint16_t		cq_count;
 	struct ibv_mr		*outumr;
 	struct ibv_mr		*inumr;
 	uint8_t			*mat;
@@ -132,4 +132,8 @@ int mlx5_ec_decode_sync(struct ibv_exp_ec_calc *ec_calc,
 
 int mlx5_ec_poll(struct ibv_exp_ec_calc *ec_calc, int n);
 
+int mlx5_ec_encode_send(struct ibv_exp_ec_calc *ec_calc,
+			struct ibv_exp_ec_mem *ec_mem,
+			struct ibv_exp_ec_stripe *data_stripes,
+			struct ibv_exp_ec_stripe *code_stripes);
 #endif /* EC_H */

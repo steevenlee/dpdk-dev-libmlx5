@@ -630,6 +630,7 @@ static void set_experimental(struct ibv_context *ctx)
 	verbs_set_exp_ctx_op(verbs_exp_ctx, ec_decode_async, mlx5_ec_decode_async);
 	verbs_set_exp_ctx_op(verbs_exp_ctx, ec_decode_sync, mlx5_ec_decode_sync);
 	verbs_set_exp_ctx_op(verbs_exp_ctx, ec_poll, mlx5_ec_poll);
+	verbs_set_exp_ctx_op(verbs_exp_ctx, ec_encode_send, mlx5_ec_encode_send);
 	if (mctx->cqe_version == 1)
 		verbs_set_exp_ctx_op(verbs_exp_ctx, drv_exp_ibv_poll_cq,
 				     mlx5_poll_cq_ex_1);
@@ -792,6 +793,7 @@ static int mlx5_alloc_context(struct verbs_device *vdev,
 			context->max_ctx_res_domain = attr.max_ctx_res_domain;
 			mlx5_spinlock_init(&context->send_db_lock, !mlx5_single_threaded);
 			INIT_LIST_HEAD(&context->send_wc_db_list);
+			INIT_LIST_HEAD(&context->wc_uar_list);
 		}
 		if (resp.exp_data.comp_mask & MLX5_EXP_ALLOC_CTX_RESP_MASK_HCA_CORE_CLOCK_OFFSET) {
 			context->core_clock.offset =
@@ -941,6 +943,7 @@ static void mlx5_free_context(struct verbs_device *device,
 	struct mlx5_context *context = to_mctx(ibctx);
 	int page_size = to_mdev(ibctx->device)->page_size;
 	int i;
+	struct mlx5_wc_uar *wc_uar;
 
 	if (context->hca_core_clock)
 		munmap(context->hca_core_clock - context->core_clock.offset,
@@ -954,6 +957,18 @@ static void mlx5_free_context(struct verbs_device *device,
 		if (context->uar[i].regs)
 			munmap(context->uar[i].regs, page_size);
 	}
+
+	if (context->max_ctx_res_domain) {
+		mlx5_spin_lock(&context->send_db_lock);
+		while (!list_empty(&context->wc_uar_list)) {
+			wc_uar = list_entry(context->wc_uar_list.next,
+					    struct mlx5_wc_uar, list);
+			list_del(&wc_uar->list);
+			free(wc_uar);
+		}
+		mlx5_spin_unlock(&context->send_db_lock);
+	}
+
 	close_debug_file(context);
 }
 
