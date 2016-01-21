@@ -89,7 +89,6 @@ static void handle_ec_comp(struct mlx5_ec_calc *calc, struct ibv_wc *wc)
 
 	ec_comp = (struct ibv_exp_ec_comp *)(uintptr_t)wc->wr_id;
 	if (ec_comp == NULL) {
-		fprintf(stderr, "ec_comp is NULL\n");
 		/* Caller didn't want a comp notification */
 		return;
 	}
@@ -176,12 +175,19 @@ struct ibv_qp *alloc_calc_qp(struct mlx5_ec_calc *calc)
 	struct ibv_qp *ibqp;
 	struct mlx5_qp *qp;
 	struct ibv_port_attr attr;
+	union ibv_gid gid;
 	int err;
 
 	memset(&attr, 0, sizeof(attr));
 	err = ibv_query_port(calc->pd->context, 1, &attr);
 	if (err) {
-		fprintf(stderr, "failed to query port\n");
+		perror("failed to query port");
+		return NULL;
+	};
+
+	err = ibv_query_gid(calc->pd->context, 1, 0, &gid);
+	if (err) {
+		perror("failed to query gid");
 		return NULL;
 	};
 
@@ -211,7 +217,7 @@ struct ibv_qp *alloc_calc_qp(struct mlx5_ec_calc *calc)
 					    IBV_QP_PKEY_INDEX |
 					    IBV_QP_ACCESS_FLAGS);
 	if (err) {
-		fprintf(stderr, "failed to modify calc qp to INIT\n");
+		perror("failed to modify calc qp to INIT");
 		goto clean_qp;
 	}
 
@@ -227,7 +233,10 @@ struct ibv_qp *alloc_calc_qp(struct mlx5_ec_calc *calc)
 	qp_attr.rq_psn = 0;
 	qp_attr.max_dest_rd_atomic = 0;
 	qp_attr.min_rnr_timer = 12;
-	qp_attr.ah_attr.is_global = 0;
+	qp_attr.ah_attr.is_global = 1;
+	qp_attr.ah_attr.grh.hop_limit = 1;
+	qp_attr.ah_attr.grh.dgid = gid;
+	qp_attr.ah_attr.grh.sgid_index = 0;
 	qp_attr.ah_attr.dlid = attr.lid;
 	qp_attr.ah_attr.sl = 0;
 	qp_attr.ah_attr.src_path_bits = 0;
@@ -240,7 +249,7 @@ struct ibv_qp *alloc_calc_qp(struct mlx5_ec_calc *calc)
 					    IBV_QP_MAX_DEST_RD_ATOMIC |
 					    IBV_QP_MIN_RNR_TIMER);
 	if (err) {
-		fprintf(stderr, "failed to modify calc qp to RTR\n");
+		perror("failed to modify calc qp to RTR");
 		goto clean_qp;
 	}
 	calc->log_chunk_size = 0;
@@ -260,7 +269,7 @@ struct ibv_qp *alloc_calc_qp(struct mlx5_ec_calc *calc)
 					    IBV_QP_SQ_PSN    |
 					    IBV_QP_MAX_QP_RD_ATOMIC);
 	if (err) {
-		fprintf(stderr, "failed to modify calc qp to RTS\n");
+		perror("failed to modify calc qp to RTS");
 		goto clean_qp;
 	}
 
@@ -925,11 +934,10 @@ static int mlx5_set_encode_data(struct mlx5_ec_calc *calc,
 	return 0;
 }
 
-int mlx5_ec_encode_async(struct ibv_exp_ec_calc *ec_calc,
+static int __mlx5_ec_encode_async(struct mlx5_ec_calc *calc,
 			 struct ibv_exp_ec_mem *ec_mem,
 			 struct ibv_exp_ec_comp *ec_comp)
 {
-	struct mlx5_ec_calc *calc = to_mcalc(ec_calc);
 	struct mlx5_qp *qp = to_mqp(calc->qp);
 	struct ibv_sge klms[4];
 	struct ibv_sge in, out, *out_ptr = NULL;
@@ -949,8 +957,6 @@ int mlx5_ec_encode_async(struct ibv_exp_ec_calc *ec_calc,
 	err = ec_post_recv((struct ibv_qp *)&qp->verbs_qp, out_ptr, ec_comp);
 	if (unlikely(err))
 		goto error;
-
-	mlx5_lock(&qp->sq.lock);
 
 	if (calc->m > 1) {
 		/* post pattern KLM - non-signaled */
@@ -986,7 +992,7 @@ int mlx5_ec_encode_async(struct ibv_exp_ec_calc *ec_calc,
 		  qp->gen_data.scur_post & 0xffff,
 		  seg, (size + 3) / 4);
 
-	mlx5_unlock(&qp->sq.lock);
+	calc->cq_count += 1;
 
 	return 0;
 
@@ -994,6 +1000,21 @@ error:
 	errno = err;
 
 	return err;
+}
+
+int mlx5_ec_encode_async(struct ibv_exp_ec_calc *ec_calc,
+			 struct ibv_exp_ec_mem *ec_mem,
+			 struct ibv_exp_ec_comp *ec_comp)
+{
+	struct mlx5_ec_calc *calc = to_mcalc(ec_calc);
+	struct mlx5_qp *qp = to_mqp(calc->qp);
+	int ret;
+
+	mlx5_lock(&qp->sq.lock);
+	ret = __mlx5_ec_encode_async(calc, ec_mem, ec_comp);
+	mlx5_unlock(&qp->sq.lock);
+
+	return ret;
 }
 
 static int set_decode_klms(struct mlx5_ec_calc *calc,
@@ -1085,13 +1106,12 @@ static int set_decode_klms(struct mlx5_ec_calc *calc,
 	return 0;
 }
 
-int mlx5_ec_decode_async(struct ibv_exp_ec_calc *ec_calc,
+static int __mlx5_ec_decode_async(struct mlx5_ec_calc *calc,
 			 struct ibv_exp_ec_mem *ec_mem,
 			 uint32_t erasures,
 			 uint8_t *decode_matrix,
 			 struct ibv_exp_ec_comp *ec_comp)
 {
-	struct mlx5_ec_calc *calc = to_mcalc(ec_calc);
 	struct mlx5_qp *qp = to_mqp(calc->qp);
 	struct mlx5_ec_decode *decode;
 	struct ibv_sge in_klms[16]; /* XXX: relief the stack? */
@@ -1113,8 +1133,6 @@ int mlx5_ec_decode_async(struct ibv_exp_ec_calc *ec_calc,
 		goto error;
 
 	decode = mlx5_get_ec_decode(calc, decode_matrix, k, m);
-
-	mlx5_lock(&qp->sq.lock);
 
 	if (m > 1) {
 		/* post pattern KLM of output - non-signaled */
@@ -1140,11 +1158,13 @@ int mlx5_ec_decode_async(struct ibv_exp_ec_calc *ec_calc,
 	finish_wqe(qp, idx, size, decode);
 	wqe_count++;
 
+	/* ring the DB */
 	qp->sq.head += wqe_count;
 	__ring_db(qp, qp->gen_data.bf->db_method,
 		  qp->gen_data.scur_post & 0xffff,
 		  seg, (size + 3) / 4);
-	mlx5_unlock(&qp->sq.lock);
+
+	calc->cq_count += 2;
 
 	return 0;
 
@@ -1152,6 +1172,24 @@ error:
 	errno = err;
 
 	return err;
+}
+
+int mlx5_ec_decode_async(struct ibv_exp_ec_calc *ec_calc,
+			 struct ibv_exp_ec_mem *ec_mem,
+			 uint32_t erasures,
+			 uint8_t *decode_matrix,
+			 struct ibv_exp_ec_comp *ec_comp)
+{
+	struct mlx5_ec_calc *calc = to_mcalc(ec_calc);
+	struct mlx5_qp *qp = to_mqp(calc->qp);
+	int ret;
+
+	mlx5_lock(&qp->sq.lock);
+	ret = __mlx5_ec_decode_async(calc, ec_mem, erasures,
+				decode_matrix, ec_comp);
+	mlx5_unlock(&qp->sq.lock);
+
+	return ret;
 }
 
 static void
@@ -1222,4 +1260,75 @@ int mlx5_ec_poll(struct ibv_exp_ec_calc *ec_calc, int n)
 	struct mlx5_ec_calc *calc = to_mcalc(ec_calc);
 
 	return ec_poll_cq(calc, n);
+}
+
+int mlx5_ec_encode_send(struct ibv_exp_ec_calc *ec_calc,
+			struct ibv_exp_ec_mem *ec_mem,
+			struct ibv_exp_ec_stripe *data_stripes,
+			struct ibv_exp_ec_stripe *code_stripes)
+{
+	struct mlx5_ec_calc *calc = to_mcalc(ec_calc);
+	struct mlx5_qp *qp = to_mqp(calc->qp);
+	struct ibv_exp_send_wr wait_wr;
+	struct ibv_exp_send_wr *bad_exp_wr;
+	struct ibv_send_wr *bad_wr;
+	int i, err;
+
+	/* stripe data */
+	for (i = 0; i < calc->k; i++) {
+		err = ibv_post_send(data_stripes[i].qp,
+				    data_stripes[i].wr, &bad_wr);
+		if (unlikely(err)) {
+			fprintf(stderr, "ibv_post_send(%d) failed\n", i);
+			return err;
+		}
+	}
+
+	mlx5_lock(&qp->sq.lock);
+	/* post async encode */
+	err = __mlx5_ec_encode_async(calc, ec_mem, NULL);
+	if (unlikely(err)) {
+		fprintf(stderr, "mlx5_ec_encode_async failed\n");
+		goto out;
+	}
+
+	/* stripe code */
+	wait_wr.exp_opcode = IBV_EXP_WR_CQE_WAIT;
+	wait_wr.exp_send_flags = IBV_EXP_SEND_WAIT_EN_LAST;
+	wait_wr.num_sge = 0;
+	wait_wr.sg_list = NULL;
+	wait_wr.task.cqe_wait.cq = calc->cq;
+	wait_wr.task.cqe_wait.cq_count = calc->cq_count;
+	calc->cq_count = 0;
+	wait_wr.next = NULL;
+	for (i = 0; i < calc->m; i++) {
+		wait_wr.wr_id = code_stripes[i].wr->wr_id;
+
+		/*
+		 * XXX: I can't post a wr chain because mlx5_exp_post_send
+		 * assumes ibv_exp_send_wr which is different than ibv_send_wr.
+		 * Bleh...
+		 */
+		err = ibv_exp_post_send(code_stripes[i].qp,
+					&wait_wr, &bad_exp_wr);
+		if (unlikely(err)) {
+			fprintf(stderr, "ibv_exp_post_send(%d) failed err=%d\n",
+				i, err);
+			goto out;
+		}
+		wait_wr.task.cqe_wait.cq_count = 0;
+
+		err = ibv_post_send(code_stripes[i].qp,
+				    code_stripes[i].wr, &bad_wr);
+		if (unlikely(err)) {
+			fprintf(stderr, "ibv_post_send(%d) failed err=%d\n",
+				i, err);
+			goto out;
+		}
+	}
+
+out:
+	mlx5_unlock(&qp->sq.lock);
+
+	return err;
 }

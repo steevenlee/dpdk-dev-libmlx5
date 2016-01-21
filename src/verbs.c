@@ -1738,6 +1738,12 @@ static struct ibv_qp *create_qp(struct ibv_context *context,
 		goto err;
 	}
 
+	if ((attrx->comp_mask & IBV_EXP_QP_INIT_ATTR_CREATE_FLAGS) &&
+	    (attrx->exp_create_flags & IBV_EXP_QP_CREATE_EC_PARITY_EN)) {
+		attrx->exp_create_flags |= IBV_EXP_QP_CREATE_CROSS_CHANNEL;
+		attrx->cap.max_send_wr *= 2;
+	}
+
 	if (qp->umr_en && (attrx->max_inl_send_klms >
 			   ctx->max_send_wqe_inline_klms)) {
 		errno = EINVAL;
@@ -3220,6 +3226,10 @@ static struct mlx5_send_db_data *allocate_send_db(struct mlx5_context *ctx)
 
 		/* Return the last send_db object to the caller */
 		send_db = &wc_uar->send_db_data[j];
+
+		mlx5_spin_lock(&ctx->send_db_lock);
+		list_add(&wc_uar->list, &ctx->wc_uar_list);
+		mlx5_spin_unlock(&ctx->send_db_lock);
 	}
 
 	return send_db;

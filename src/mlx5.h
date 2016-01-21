@@ -399,8 +399,9 @@ struct mlx5_context {
 
 	struct mlx5_uar_data		uar[MLX5_MAX_UAR_PAGES];
 
-	struct mlx5_spinlock		send_db_lock; /* protects send_db_list and send_db_num_uars */
+	struct mlx5_spinlock		send_db_lock; /* protects send_db_list, wc_uar_list and send_db_num_uars */
 	struct list_head		send_wc_db_list;
+	struct list_head		wc_uar_list;
 	unsigned int			num_wc_uars;
 	int				max_ctx_res_domain;
 	uint64_t			exp_device_cap_flags; /* Cached from device caps */
@@ -808,6 +809,7 @@ struct mlx5_wc_uar {
 	int				uar_idx;
 	/* The virtual address of the WC mmaped UAR */
 	void				*uar;
+	struct list_head		list;
 };
 
 struct mlx5_res_domain {
