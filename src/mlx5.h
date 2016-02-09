@@ -129,7 +129,7 @@
 
 enum {
 	MLX5_MAX_CQ_FAMILY_VER		= 1,
-	MLX5_MAX_QP_BURST_FAMILY_VER	= 0,
+	MLX5_MAX_QP_BURST_FAMILY_VER	= 1,
 	MLX5_MAX_WQ_FAMILY_VER		= 0
 };
 
@@ -510,6 +510,62 @@ enum mlx5_cq_creation_flags {
 	MLX5_CQ_CREATION_FLAG_COMPLETION_TIMESTAMP = 1 << 0,
 };
 
+struct mlx5_mini_cqe8 {
+	union {
+		uint32_t rx_hash_result;
+		uint32_t checksum;
+		struct {
+			uint16_t wqe_counter;
+			uint8_t  s_wqe_opcode;
+			uint8_t  reserved;
+		} s_wqe_info;
+	};
+	uint32_t byte_cnt;
+};
+
+enum {
+	MLX5_MINI_ARR_SIZE	= 8
+};
+
+struct mlx5_cqe64 {
+	uint8_t		rsvd0[2];
+	/*
+	 * wqe_id is valid only for Striding RQ (Multi-Packet RQ).
+	 * It provides the WQE index inside the RQ.
+	 */
+	uint16_t	wqe_id;
+	uint8_t		rsvd4[8];
+	uint32_t	rx_hash_res;
+	uint8_t		rx_hash_type;
+	uint8_t		ml_path;
+	uint8_t		rsvd20[2];
+	uint16_t	checksum;
+	uint16_t	slid;
+	uint32_t	flags_rqpn;
+	uint8_t		hds_ip_ext;
+	uint8_t		l4_hdr_type_etc;
+	__be16		vlan_info;
+	uint32_t	srqn_uidx;
+	uint32_t	imm_inval_pkey;
+	uint8_t		rsvd40[4];
+	uint32_t	byte_cnt;
+	__be64		timestamp;
+	union {
+		uint32_t	sop_drop_qpn;
+		struct {
+			uint8_t	sop;
+			uint8_t qpn[3];
+		} sop_qpn;
+	};
+	/*
+	 * In Striding RQ (Multi-Packet RQ) wqe_counter provides
+	 * the WQE stride index (to calc pointer to start of the message)
+	 */
+	uint16_t	wqe_counter;
+	uint8_t		signature;
+	uint8_t		op_own;
+};
+
 struct mlx5_cq {
 	struct ibv_cq			ibv_cq;
 	uint32_t			creation_flags;
@@ -537,6 +593,15 @@ struct mlx5_cq {
 	uint8_t				model_flags; /* use mlx5_cq_model_flags */
 	uint16_t			cqe_comp_max_num;
 	uint8_t				cq_log_size;
+	/* Compressed CQE data */
+	struct mlx5_cqe64		next_decomp_cqe64;
+	struct mlx5_resource	       *compressed_rsc;
+	uint16_t			compressed_left;
+	uint16_t			compressed_wqe_cnt;
+	uint8_t				compressed_req;
+	uint8_t				compressed_mp_rq;
+	uint8_t				mini_arr_idx;
+	struct mlx5_mini_cqe8		mini_array[MLX5_MINI_ARR_SIZE];
 };
 
 struct mlx5_srq {
@@ -1132,7 +1197,7 @@ void *mlx5_exp_query_intf(struct ibv_context *context, struct ibv_exp_query_intf
 			  enum ibv_exp_query_intf_status *status);
 int mlx5_exp_release_intf(struct ibv_context *context, void *intf,
 			  struct ibv_exp_release_intf_params *params);
-struct ibv_exp_qp_burst_family *mlx5_get_qp_burst_family(struct mlx5_qp *qp,
+struct ibv_exp_qp_burst_family_v1 *mlx5_get_qp_burst_family(struct mlx5_qp *qp,
 							 struct ibv_exp_query_intf_params *params,
 							 enum ibv_exp_query_intf_status *status);
 struct ibv_exp_wq_family *mlx5_get_wq_family(struct mlx5_rwq *rwq,
