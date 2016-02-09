@@ -129,10 +129,8 @@ static int mlx5_ec_poll_cq(struct mlx5_ec_calc *calc)
 	int err, count;
 
 	err = ibv_get_cq_event(calc->channel, &ev_cq, &ev_ctx);
-	if (unlikely(err)) {
-		fprintf(stderr, "Failed to get cq_event\n");
-		return -1;
-	}
+	if (unlikely(err))
+		return err;
 
 	if (unlikely(ev_cq != calc->cq)) {
 		fprintf(stderr, "CQ event for unknown CQ %p\n", ev_cq);
@@ -151,10 +149,19 @@ static int mlx5_ec_poll_cq(struct mlx5_ec_calc *calc)
 	return 0;
 }
 
+static void ec_sig_handler(int signo)
+{
+}
+
 void *handle_comp_events(void *data)
 {
 	struct mlx5_ec_calc *calc = data;
 	int n = 0;
+	struct sigaction sa = { };
+
+	sigemptyset(&sa.sa_mask);
+	sa.sa_handler = ec_sig_handler;
+	sigaction(SIGINT, &sa, 0);
 
 	while (!calc->stop_ec_poller) {
 		if(unlikely(mlx5_ec_poll_cq(calc)))
@@ -164,6 +171,8 @@ void *handle_comp_events(void *data)
 			n = 0;
 		}
 	}
+
+	ibv_ack_cq_events(calc->cq, n);
 
 	return NULL;
 }

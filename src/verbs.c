@@ -1606,8 +1606,11 @@ static void update_caps(struct ibv_context *context)
 	if (attr.comp_mask & IBV_EXP_DEVICE_ATTR_UMR)
 		ctx->max_send_wqe_inline_klms =
 			attr.umr_caps.max_send_wqe_inline_klms;
-	if (attr.comp_mask & IBV_EXP_DEVICE_ATTR_EXT_ATOMIC_ARGS)
+	if (attr.comp_mask & IBV_EXP_DEVICE_ATTR_MASKED_ATOMICS)
 		ctx->info.bit_mask_log_atomic_arg_sizes =
+			attr.masked_atomic.masked_log_atomic_arg_sizes;
+	if (attr.comp_mask & IBV_EXP_DEVICE_ATTR_EXT_ATOMIC_ARGS)
+		ctx->info.bit_mask_log_atomic_arg_sizes |=
 			attr.ext_atom.log_atomic_arg_sizes;
 
 	return;
