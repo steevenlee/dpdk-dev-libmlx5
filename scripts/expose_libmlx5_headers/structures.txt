@@ -41,3 +41,5 @@ mlx5_wq
 mlx5_bf
 mlx5_qp
 mlx5_ah
+mlx5_rwq
+mlx5_wqe_eth_seg
