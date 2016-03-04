@@ -974,7 +974,7 @@ static int __mlx5_post_send_one_raw_packet(struct ibv_exp_send_wr *wr,
 	if (exp_send_flags & IBV_EXP_SEND_IP_CSUM)
 		eseg->cs_flags = MLX5_ETH_WQE_L3_CSUM | MLX5_ETH_WQE_L4_CSUM;
 
-	/* The first 16 bytes of the headers should be copied to the
+	/* The first bytes of the headers should be copied to the
 	 * inline-headers of the ETH segment.
 	 */
 	if (likely(wr->sg_list[0].length >= MLX5_ETH_INLINE_HEADER_SIZE)) {
@@ -994,7 +994,8 @@ static int __mlx5_post_send_one_raw_packet(struct ibv_exp_send_wr *wr,
 		}
 		--i;
 		if (unlikely(inl_hdr_size)) {
-			mlx5_dbg(fp, MLX5_DBG_QP_SEND, "Ethernet headers < 16 bytes\n");
+			mlx5_dbg(fp, MLX5_DBG_QP_SEND, "Ethernet headers < %d bytes\n",
+				 MLX5_ETH_INLINE_HEADER_SIZE);
 			return EINVAL;
 		}
 	}
@@ -2048,7 +2049,7 @@ static inline int send_pending(struct ibv_qp *ibqp, uint64_t addr,
 					if (unlikely(length <= MLX5_ETH_INLINE_HEADER_SIZE))
 						return EINVAL;
 
-					/* Copy the first 16 bytes into the inline header */
+					/* Copy the first bytes into the inline header */
 					memcpy(eseg->inline_hdr_start, (void *)(uintptr_t)addr,
 					       MLX5_ETH_INLINE_HEADER_SIZE);
 
