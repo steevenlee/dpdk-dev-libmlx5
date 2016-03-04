@@ -113,8 +113,20 @@ enum {
 
 enum {
 	MLX5_CQE_L3_HDR_TYPE_NONE	= 0x0,
-	MLX5_CQE_L3_HDR_TYPE_IPV6	= 0x1,
-	MLX5_CQE_L3_HDR_TYPE_IPV4	= 0x2,
+	MLX5_CQE_L3_HDR_TYPE_IPV6	= 0x4,
+	MLX5_CQE_L3_HDR_TYPE_IPV4	= 0x8,
+};
+
+enum {
+	MLX5_CQE_L4_HDR_TYPE_TCP		= 0x10,
+	MLX5_CQE_L4_HDR_TYPE_UDP		= 0x20,
+	MLX5_CQE_L4_HDR_TYPE_TCP_EMP_ACK	= 0x30,
+	MLX5_CQE_L4_HDR_TYPE_TCP_ACK		= 0x40,
+};
+
+enum {
+	MLX5_CQE_L3_HDR_TYPE_MASK	= 0xC,
+	MLX5_CQE_L4_HDR_TYPE_MASK	= 0x70,
 };
 
 enum {
@@ -139,58 +151,6 @@ struct mlx5_err_cqe {
 	uint8_t		op_own;
 };
 
-struct mlx5_mini_cqe8 {
-	union {
-		uint32_t rx_hash_result;
-		uint32_t checksum;
-		struct {
-			uint16_t wqe_counter;
-			uint8_t  s_wqe_opcode;
-			uint8_t  reserved;
-		} s_wqe_info;
-	};
-	uint32_t byte_cnt;
-};
-
-struct mlx5_cqe64 {
-	uint8_t		rsvd0[2];
-	/*
-	 * wqe_id is valid only for Striding RQ (Multi-Packet RQ).
-	 * It provides the WQE index inside the RQ.
-	 */
-	uint16_t	wqe_id;
-	uint8_t		rsvd4[8];
-	uint32_t	rx_hash_res;
-	uint8_t		rx_hash_type;
-	uint8_t		ml_path;
-	uint8_t		rsvd20[2];
-	uint16_t	checksum;
-	uint16_t	slid;
-	uint32_t	flags_rqpn;
-	uint8_t		hds_ip_ext;
-	uint8_t		l4_hdr_type_etc;
-	__be16		vlan_info;
-	uint32_t	srqn_uidx;
-	uint32_t	imm_inval_pkey;
-	uint8_t		rsvd40[4];
-	uint32_t	byte_cnt;
-	__be64		timestamp;
-	union {
-		uint32_t	sop_drop_qpn;
-		struct {
-			uint8_t	sop;
-			uint8_t qpn[3];
-		} sop_qpn;
-	};
-	/*
-	 * In Striding RQ (Multi-Packet RQ) wqe_counter provides
-	 * the WQE stride index (to calc pointer to start of the message)
-	 */
-	uint16_t	wqe_counter;
-	uint8_t		signature;
-	uint8_t		op_own;
-};
-
 int mlx5_stall_num_loop = 60;
 int mlx5_stall_cq_poll_min = 60;
 int mlx5_stall_cq_poll_max = 100000;
@@ -203,11 +163,6 @@ static inline int mlx5_get_cqe_format(struct mlx5_cqe64 *cqe)
 	return (cqe->op_own & MLX5E_CQE_FORMAT_MASK) >> 2;
 }
 
-static inline uint8_t get_cqe_l3_hdr_type(struct mlx5_cqe64 *cqe)
-{
-	return (cqe->l4_hdr_type_etc >> 2) & 0x3;
-}
-
 static void *get_buf_cqe(struct mlx5_buf *buf, int n, int cqe_sz)
 {
 	return buf->buf + n * cqe_sz;
@@ -218,27 +173,30 @@ static void *get_cqe(struct mlx5_cq *cq, int n)
 	return cq->active_buf->buf + n * cq->cqe_sz;
 }
 
-static inline void *get_sw_cqe(struct mlx5_cq *cq, int n) __attribute__((always_inline));
-static inline void *get_sw_cqe(struct mlx5_cq *cq, int n)
+static inline void *get_sw_cqe(struct mlx5_cq *cq, int n, int cqe_mask) __attribute__((always_inline));
+static inline void *get_sw_cqe(struct mlx5_cq *cq, int n, int cqe_mask)
 {
-	void *cqe = get_cqe(cq, n & cq->ibv_cq.cqe);
+	void *cqe = get_cqe(cq, n & cqe_mask);
 	struct mlx5_cqe64 *cqe64;
 
 	cqe64 = (cq->cqe_sz == 64) ? cqe : cqe + 64;
 
 	if (likely((cqe64->op_own) >> 4 != MLX5_CQE_INVALID) &&
-	    !((cqe64->op_own & MLX5_CQE_OWNER_MASK) ^ !!(n & (cq->ibv_cq.cqe + 1)))) {
+	    !((cqe64->op_own & MLX5_CQE_OWNER_MASK) ^ !!(n & (cqe_mask + 1)))) {
 		return cqe;
 	} else {
 		return NULL;
 	}
 }
 
-static inline struct mlx5_cqe64 *get_next_cqe(struct mlx5_cq *cq,  const int cqe_sz)
+static inline struct mlx5_cqe64 *get_next_cqe(struct mlx5_cq *cq, const int cqe_sz)
 {
 	unsigned idx = cq->cons_index & cq->ibv_cq.cqe;
 	void *cqe = cq->active_buf->buf + idx * cqe_sz;
 	struct mlx5_cqe64 *cqe64;
+
+	if (unlikely(cq->compressed_left))
+		return &cq->next_decomp_cqe64;
 
 	cqe64 = (cqe_sz == 64) ? cqe : cqe + 64;
 
@@ -248,11 +206,6 @@ static inline struct mlx5_cqe64 *get_next_cqe(struct mlx5_cq *cq,  const int cqe
 	}
 
 	return NULL;
-}
-
-static struct mlx5_cqe64 *next_cqe_sw(struct mlx5_cq *cq)
-{
-	return get_next_cqe(cq, cq->cqe_sz);
 }
 
 static void handle_good_req(struct ibv_wc *wc, struct mlx5_cqe64 *cqe)
@@ -551,11 +504,11 @@ static int is_responder(uint8_t opcode)
 
 static inline void copy_cqes(struct mlx5_cq *cq, struct mlx5_mini_cqe8 *mini_array,
 			     struct mlx5_cqe64 *title, int cnt, uint16_t *wqe_cnt, int cqe_idx,
-			     const int mp_rq)
+			     const int mp_rq, int cqe_mask)
 	__attribute__((always_inline));
 static inline void copy_cqes(struct mlx5_cq *cq, struct mlx5_mini_cqe8 *mini_array,
 			     struct mlx5_cqe64 *title, int cnt, uint16_t *wqe_cnt, int cqe_idx,
-			     const int mp_rq)
+			     const int mp_rq, int cqe_mask)
 {
 	struct mlx5_cqe64 *cqe;
 	int i;
@@ -564,7 +517,7 @@ static inline void copy_cqes(struct mlx5_cq *cq, struct mlx5_mini_cqe8 *mini_arr
 	uint8_t opown = title->op_own & 0xf2;
 
 	for (i = 0; i < cnt; i++) {
-		cqe = get_cqe(cq, (cqe_idx + i) & cq->ibv_cq.cqe);
+		cqe = get_cqe(cq, (cqe_idx + i) & cqe_mask);
 		memcpy(cqe, title, sizeof(*title));
 		cqe->byte_cnt = mini_array[i].byte_cnt;
 		cqe->op_own = opown | (((cqe_idx + i) >> log_size) & 1);
@@ -611,9 +564,9 @@ static inline struct mlx5_resource *find_rsc(struct mlx5_cq *cq,
 	return mlx5_find_rsc(to_mctx(cq->ibv_cq.context), rsn);
 }
 
-static inline void mlx5_decompress_cqe_idx(struct mlx5_cq *cq, uint32_t cqe_idx)
+static inline void mlx5_decompress_cqe_idx(struct mlx5_cq *cq, uint32_t cqe_idx, int cqe_mask)
 	__attribute__((always_inline));
-static inline void mlx5_decompress_cqe_idx(struct mlx5_cq *cq, uint32_t cqe_idx)
+static inline void mlx5_decompress_cqe_idx(struct mlx5_cq *cq, uint32_t cqe_idx, int cqe_mask)
 {
 	struct mlx5_cqe64 *title, *cqe;
 	struct mlx5_mini_cqe8 mini_array[8];
@@ -622,28 +575,202 @@ static inline void mlx5_decompress_cqe_idx(struct mlx5_cq *cq, uint32_t cqe_idx)
 	struct mlx5_resource *cur_rsc;
 	int mp_rq;
 
-	cqe = get_cqe(cq, cqe_idx & cq->ibv_cq.cqe);
+	cqe = get_cqe(cq, cqe_idx & cqe_mask);
 	title = cqe;
-	memcpy(mini_array, get_cqe(cq, (cqe_idx + 1) & cq->ibv_cq.cqe), sizeof(*title));
+	memcpy(mini_array, get_cqe(cq, (cqe_idx + 1) & cqe_mask), sizeof(*title));
 	cqe_cnt = ntohl(title->byte_cnt);
 	wqe_cnt = ntohs(title->wqe_counter);
 	cur_rsc = find_rsc(cq, title, (to_mctx(cq->ibv_cq.context))->cqe_version);
 	mp_rq = cur_rsc ? cur_rsc->type == MLX5_RSC_TYPE_MP_RWQ : 0;
 
-	for (; cqe_cnt > 7; cqe_idx += 8, cqe_cnt -= 8) {
-		copy_cqes(cq, mini_array, title, 8, &wqe_cnt, cqe_idx, mp_rq);
-		cqe = get_cqe(cq, (cqe_idx + 8) & cq->ibv_cq.cqe);
+	for (; cqe_cnt > MLX5_MINI_ARR_SIZE - 1;
+	     cqe_idx += MLX5_MINI_ARR_SIZE, cqe_cnt -= MLX5_MINI_ARR_SIZE) {
+		copy_cqes(cq, mini_array, title, MLX5_MINI_ARR_SIZE, &wqe_cnt,
+			  cqe_idx, mp_rq, cqe_mask);
+		cqe = get_cqe(cq, (cqe_idx + MLX5_MINI_ARR_SIZE) &
+				  cqe_mask);
 		memcpy(mini_array, cqe, sizeof(*title));
 	}
 
-	copy_cqes(cq, mini_array, title, cqe_cnt, &wqe_cnt, cqe_idx, mp_rq);
+	copy_cqes(cq, mini_array, title, cqe_cnt, &wqe_cnt, cqe_idx, mp_rq, cqe_mask);
 }
 
-static inline void mlx5_decompress_cqe(struct mlx5_cq *cq)
+static inline void mlx5_decompress_curr(struct mlx5_cq *cq, uint32_t cqe_idx, int cqe_mask)
 	__attribute__((always_inline));
-static inline void mlx5_decompress_cqe(struct mlx5_cq *cq)
+static inline void mlx5_decompress_curr(struct mlx5_cq *cq, uint32_t cqe_idx, int cqe_mask)
 {
-	mlx5_decompress_cqe_idx(cq, cq->cons_index);
+	struct mlx5_cqe64 *title, *cqe;
+	struct mlx5_mini_cqe8 mini_array[8];
+	int cqe_cnt = cq->compressed_left;
+	uint16_t wqe_cnt = cq->compressed_wqe_cnt;
+	int mp_rq = cq->compressed_mp_rq;
+	int first_chunk;
+
+	if (!cqe_cnt)
+		return;
+
+	cq->compressed_left = 0;
+	title = &cq->next_decomp_cqe64;
+	first_chunk = min(cqe_cnt, MLX5_MINI_ARR_SIZE - cq->mini_arr_idx);
+	copy_cqes(cq, &cq->mini_array[cq->mini_arr_idx], title, first_chunk,
+		  &wqe_cnt, cqe_idx, mp_rq, cqe_mask);
+	cqe_cnt -= first_chunk;
+	if (!cqe_cnt)
+		return;
+	cqe_idx = cqe_idx + first_chunk;
+
+	cqe = get_cqe(cq, cqe_idx & cqe_mask);
+	memcpy(mini_array, cqe, sizeof(*title));
+	for (; cqe_cnt > MLX5_MINI_ARR_SIZE - 1;
+	     cqe_idx += MLX5_MINI_ARR_SIZE, cqe_cnt -= MLX5_MINI_ARR_SIZE) {
+		copy_cqes(cq, mini_array, title, MLX5_MINI_ARR_SIZE, &wqe_cnt,
+			  cqe_idx, mp_rq, cqe_mask);
+		cqe = get_cqe(cq, (cqe_idx + MLX5_MINI_ARR_SIZE) &
+				  cqe_mask);
+		memcpy(mini_array, cqe, sizeof(*title));
+	}
+
+	copy_cqes(cq, mini_array, title, cqe_cnt, &wqe_cnt, cqe_idx, mp_rq, cqe_mask);
+}
+
+static inline void update_cqe_ownership(struct mlx5_cq *cq, int size) __attribute__((always_inline));
+static inline void update_cqe_ownership(struct mlx5_cq *cq, int size)
+{
+	uint8_t opown = (cq->cons_index >> (cq->cq_log_size)) & 1;
+	uint32_t idx = cq->cons_index & cq->ibv_cq.cqe;
+	struct mlx5_cqe64 *cqe = get_cqe(cq, idx);
+	int step_size = cq->cqe_sz / sizeof(*cqe);
+	uint32_t last_idx;
+
+	last_idx = idx + size;
+	while ((idx < last_idx) && (idx <= cq->ibv_cq.cqe)) {
+		cqe->op_own = opown;
+		cqe += step_size;
+		idx++;
+	}
+	if (unlikely(idx < last_idx)) {
+		cqe = get_cqe(cq, 0);
+		while (idx < last_idx) {
+			cqe->op_own = !opown;
+			cqe += step_size;
+			idx++;
+		}
+	}
+
+}
+
+static inline void save_mini_arr(struct mlx5_cq *cq, uint32_t cqe_idx) __attribute__((always_inline));
+static inline void save_mini_arr(struct mlx5_cq *cq, uint32_t cqe_idx)
+{
+	struct mlx5_cqe64 *cqe = get_cqe(cq, cqe_idx & cq->ibv_cq.cqe);
+
+	memcpy(&cq->mini_array, cqe, sizeof(cq->mini_array));
+	cq->mini_arr_idx = 0;
+	update_cqe_ownership(cq, min(cq->compressed_left, MLX5_MINI_ARR_SIZE));
+}
+
+static inline void save_title(struct mlx5_cq *cq, uint32_t cqe_idx, int rx_only) __attribute__((always_inline));
+static inline void save_title(struct mlx5_cq *cq, uint32_t cqe_idx, int rx_only)
+{
+	struct mlx5_cqe64 *cqe = get_cqe(cq, cqe_idx & cq->ibv_cq.cqe);
+
+	memcpy(&cq->next_decomp_cqe64, cqe, sizeof(cq->next_decomp_cqe64));
+	cq->compressed_left = ntohl(cq->next_decomp_cqe64.byte_cnt);
+	cq->compressed_req = is_requestor(cq->next_decomp_cqe64.op_own >> 4);
+	cq->compressed_wqe_cnt = ntohs(cq->next_decomp_cqe64.wqe_counter);
+	if (unlikely(rx_only && cq->compressed_req))
+		cq->compressed_rsc = NULL;
+	else
+		cq->compressed_rsc = find_rsc(cq, &cq->next_decomp_cqe64, (to_mctx(cq->ibv_cq.context))->cqe_version);
+	cq->compressed_mp_rq = cq->compressed_rsc ? cq->compressed_rsc->type == MLX5_RSC_TYPE_MP_RWQ : 0;
+}
+
+static inline void decomp_next_cqe(struct mlx5_cq *cq) __attribute__((always_inline));
+static inline void decomp_next_cqe(struct mlx5_cq *cq)
+{
+	struct mlx5_mini_cqe8 *mini_ent;
+
+	if (unlikely(cq->mini_arr_idx == MLX5_MINI_ARR_SIZE))
+		save_mini_arr(cq, cq->cons_index);
+	mini_ent = &cq->mini_array[cq->mini_arr_idx];
+	cq->next_decomp_cqe64.byte_cnt = mini_ent->byte_cnt;
+	if (cq->compressed_req) {
+		cq->next_decomp_cqe64.wqe_counter = mini_ent->s_wqe_info.wqe_counter;
+		cq->next_decomp_cqe64.sop_qpn.sop = mini_ent->s_wqe_info.s_wqe_opcode;
+	} else {
+		/* for now we are supporting only rx_hash_res not
+		 * checksum */
+		cq->next_decomp_cqe64.rx_hash_res = mini_ent->rx_hash_result;
+		cq->next_decomp_cqe64.wqe_counter = htons(cq->compressed_wqe_cnt);
+		if (cq->compressed_mp_rq)
+			/*
+			 * In case of mp_rq the wqe_cnt is the stride index of the message start,
+			 * therefore we need to increase it by the number of consumed strides
+			 */
+			cq->compressed_wqe_cnt += (ntohl(mini_ent->byte_cnt) & MP_RQ_NUM_STRIDES_FIELD_MASK) >>
+						  MP_RQ_NUM_STRIDES_FIELD_SHIFT;
+		else
+			/*
+			 * In case of non mp_rq the wqe_cnt is the sq/rq wqe counter,
+			 * therefore we need to increase it by one
+			 */
+			cq->compressed_wqe_cnt++;
+	}
+	cq->mini_arr_idx++;
+	cq->compressed_left--;
+}
+
+static inline void acc_rx_decomp_next_cqe(struct mlx5_cq *cq, uint32_t *byte_cnt) __attribute__((always_inline));
+static inline void acc_rx_decomp_next_cqe(struct mlx5_cq *cq, uint32_t *byte_cnt)
+{
+	struct mlx5_mini_cqe8 *mini_ent;
+
+	if (unlikely(cq->mini_arr_idx == MLX5_MINI_ARR_SIZE))
+		save_mini_arr(cq, cq->cons_index);
+	mini_ent = &cq->mini_array[cq->mini_arr_idx];
+	*byte_cnt = ntohl(mini_ent->byte_cnt);
+	cq->next_decomp_cqe64.wqe_counter = htons(cq->compressed_wqe_cnt);
+	if (cq->compressed_mp_rq)
+		/*
+		 * In case of mp_rq the wqe_cnt is the stride index of the message start,
+		 * therefore we need to increase it by the number of consumed strides
+		 */
+		cq->compressed_wqe_cnt += (*byte_cnt & MP_RQ_NUM_STRIDES_FIELD_MASK) >>
+					  MP_RQ_NUM_STRIDES_FIELD_SHIFT;
+	else
+		/*
+		 * In case of non mp_rq the wqe_cnt is the sq/rq wqe counter,
+		 * therefore we need to increase it by one
+		 */
+		cq->compressed_wqe_cnt++;
+	cq->mini_arr_idx++;
+	cq->compressed_left--;
+}
+
+static inline struct mlx5_cqe64 *mlx5_decompress_cqe(struct mlx5_cq *cq)
+	__attribute__((always_inline));
+static inline struct mlx5_cqe64 *mlx5_decompress_cqe(struct mlx5_cq *cq)
+{
+	if (unlikely(!cq->compressed_left)) {
+		save_title(cq, cq->cons_index, 0);
+		save_mini_arr(cq, cq->cons_index + 1);
+	}
+	decomp_next_cqe(cq);
+
+	return &cq->next_decomp_cqe64;
+}
+
+static inline struct mlx5_cqe64 *mlx5_acc_rx_decompress_cqe(struct mlx5_cq *cq, uint32_t *byte_cnt)
+	__attribute__((always_inline));
+static inline struct mlx5_cqe64 *mlx5_acc_rx_decompress_cqe(struct mlx5_cq *cq, uint32_t *byte_cnt)
+{
+	if (unlikely(!cq->compressed_left)) {
+		save_title(cq, cq->cons_index, 1);
+		save_mini_arr(cq, cq->cons_index + 1);
+	}
+	acc_rx_decomp_next_cqe(cq, byte_cnt);
+
+	return &cq->next_decomp_cqe64;
 }
 
 static inline int mlx5_poll_one(struct mlx5_cq *cq,
@@ -682,13 +809,13 @@ static inline int mlx5_poll_one(struct mlx5_cq *cq,
 	int timestamp_en = cq->creation_flags &
 		MLX5_CQ_CREATION_FLAG_COMPLETION_TIMESTAMP;
 
-	cqe64 = next_cqe_sw(cq);
+	cqe64 = get_next_cqe(cq, cq->cqe_sz);
 	if (!cqe64)
 		return CQ_EMPTY;
 
 	cqe_format = mlx5_get_cqe_format(cqe64);
 	if (unlikely(cqe_format == MLX5_COMPRESSED)) {
-		mlx5_decompress_cqe(cq);
+		cqe64 = mlx5_decompress_cqe(cq);
 		timestamp_en = 0;
 	}
 	++cq->cons_index;
@@ -819,7 +946,7 @@ static inline int mlx5_poll_one(struct mlx5_cq *cq,
 					      is_srq ? *cur_srq : NULL, type);
 		if (mqp &&
 		    (mqp->gen_data.model_flags & MLX5_QP_MODEL_RX_CSUM_IP_OK_IP_NON_TCP_UDP)) {
-			l3_hdr = get_cqe_l3_hdr_type(cqe64);
+			l3_hdr = (cqe64->l4_hdr_type_etc) & MLX5_CQE_L3_HDR_TYPE_MASK;
 			exp_wc_flags |=
 				(!!(cqe64->hds_ip_ext & MLX5_CQE_L4_OK) *
 				 (uint64_t)IBV_EXP_WC_RX_TCP_UDP_CSUM_OK) |
@@ -1052,9 +1179,10 @@ void __mlx5_cq_clean(struct mlx5_cq *cq, uint32_t rsn_uidx, struct mlx5_srq *srq
 	 * from our QP and therefore don't need to be checked.
 	 */
 	cqe_version = (to_mctx(cq->ibv_cq.context))->cqe_version;
-	for (prod_index = cq->cons_index; (cqe = get_sw_cqe(cq, prod_index)); ++prod_index) {
+	mlx5_decompress_curr(cq, cq->cons_index, cq->ibv_cq.cqe);
+	for (prod_index = cq->cons_index; (cqe = get_sw_cqe(cq, prod_index, cq->ibv_cq.cqe)); ++prod_index) {
 		if (mlx5_get_cqe_format(cqe) == MLX5_COMPRESSED)
-			mlx5_decompress_cqe_idx(cq, prod_index);
+			mlx5_decompress_cqe_idx(cq, prod_index, cq->ibv_cq.cqe);
 
 		if (prod_index == cq->cons_index + cq->ibv_cq.cqe)
 			break;
@@ -1117,10 +1245,20 @@ void mlx5_cq_resize_copy_cqes(struct mlx5_cq *cq)
 	int ssize;
 	int dsize;
 	int i;
+	int prod_index;
 	uint8_t sw_own;
 
 	ssize = cq->cqe_sz;
 	dsize = cq->resize_cqe_sz;
+	prod_index = cq->cons_index;
+	mlx5_decompress_curr(cq, prod_index, cq->active_cqes);
+	for (; (scqe = get_sw_cqe(cq, prod_index, cq->active_cqes)); ++prod_index) {
+		if (mlx5_get_cqe_format(scqe) == MLX5_COMPRESSED)
+			mlx5_decompress_cqe_idx(cq, prod_index, cq->active_cqes);
+
+		if (prod_index == cq->cons_index + cq->active_cqes)
+			break;
+	}
 
 	i = cq->cons_index;
 	scqe = get_buf_cqe(cq->active_buf, i & cq->active_cqes, ssize);
@@ -1228,7 +1366,7 @@ static inline int32_t poll_cnt(struct ibv_cq *ibcq, uint32_t max_entries,
 		}
 
 		if (unlikely(mlx5_get_cqe_format(cqe64) == MLX5_COMPRESSED))
-			mlx5_decompress_cqe(cq);
+			cqe64 = mlx5_decompress_cqe(cq);
 
 		cur_rsc = find_rsc(cq, cqe64, cqe_ver);
 		if (unlikely(!cur_rsc)) {
@@ -1271,13 +1409,18 @@ static inline int32_t get_rx_offloads_flags(struct mlx5_cqe64 *cqe) __attribute_
 static inline int32_t get_rx_offloads_flags(struct mlx5_cqe64 *cqe)
 {
 	uint8_t l3_hdr;
+	uint8_t l4_hdr;
 	int32_t flags;
 
-	l3_hdr = get_cqe_l3_hdr_type(cqe);
+	l3_hdr = (cqe->l4_hdr_type_etc) & MLX5_CQE_L3_HDR_TYPE_MASK;
+	l4_hdr = (cqe->l4_hdr_type_etc) & MLX5_CQE_L4_HDR_TYPE_MASK;
 	flags = (!!(cqe->hds_ip_ext & MLX5_CQE_L4_OK) * IBV_EXP_CQ_RX_TCP_UDP_CSUM_OK) |
 		(!!(cqe->hds_ip_ext & MLX5_CQE_L3_OK) * IBV_EXP_CQ_RX_IP_CSUM_OK) |
 		((l3_hdr == MLX5_CQE_L3_HDR_TYPE_IPV4) * IBV_EXP_CQ_RX_IPV4_PACKET) |
-		((l3_hdr == MLX5_CQE_L3_HDR_TYPE_IPV6) * IBV_EXP_CQ_RX_IPV6_PACKET);
+		((l3_hdr == MLX5_CQE_L3_HDR_TYPE_IPV6) * IBV_EXP_CQ_RX_IPV6_PACKET) |
+		(((l4_hdr == MLX5_CQE_L4_HDR_TYPE_TCP) || (l4_hdr == MLX5_CQE_L4_HDR_TYPE_TCP_EMP_ACK) ||
+		  (l4_hdr == MLX5_CQE_L4_HDR_TYPE_TCP_ACK)) * IBV_EXP_CQ_RX_TCP_PACKET) |
+		((l4_hdr == MLX5_CQE_L4_HDR_TYPE_UDP) * IBV_EXP_CQ_RX_UDP_PACKET);
 
 	return flags;
 }
@@ -1297,6 +1440,7 @@ static inline int32_t poll_length(struct ibv_cq *ibcq, void *buf, uint32_t *inl,
 	struct mlx5_qp *mqp = NULL;
 	struct mlx5_rwq *rwq = NULL;
 	int32_t size = 0;
+	uint32_t byte_cnt;
 	uint16_t wqe_ctr;
 	int err = CQ_OK;
 	int cqe_format;
@@ -1312,24 +1456,26 @@ static inline int32_t poll_length(struct ibv_cq *ibcq, void *buf, uint32_t *inl,
 	if (cqe64) {
 		cqe_format = mlx5_get_cqe_format(cqe64);
 		if (unlikely(cqe_format == MLX5_COMPRESSED)) {
-			mlx5_decompress_cqe(cq);
+			cqe64 = mlx5_acc_rx_decompress_cqe(cq, &byte_cnt);
 			cqe_format = 0;
+			cur_rsc = cq->compressed_rsc;
+		} else {
+			if (unlikely((cqe64->op_own >> 4) != MLX5_CQE_RESP_SEND)) {
+				if (cqe64->op_own >> 4 == MLX5_CQE_RESP_ERR)
+					mlx5_dbg(fp, MLX5_DBG_CQ_CQE, "poll_length, CQE response error, syndrome=0x%x, vendor syndrome error=0x%x, HW syndrome 0x%x, HW syndrome type 0x%x\n",
+						 ((struct mlx5_err_cqe *)cqe64)->syndrome,
+						 ((struct mlx5_err_cqe *)cqe64)->vendor_err_synd,
+						 ((struct mlx5_err_cqe *)cqe64)->hw_err_synd,
+						 ((struct mlx5_err_cqe *)cqe64)->hw_synd_type);
+				else
+					mlx5_dbg(fp, MLX5_DBG_CQ_CQE, "Only post-receive completion supported on poll_length, op=%u\n",
+						 cqe64->op_own >> 4);
+				err = CQ_POLL_ERR;
+				goto out;
+			}
+			cur_rsc = find_rsc(cq, cqe64, cqe_ver);
+			byte_cnt = ntohl(cqe64->byte_cnt);
 		}
-
-		if (unlikely((cqe64->op_own >> 4) != MLX5_CQE_RESP_SEND)) {
-			if (cqe64->op_own >> 4 == MLX5_CQE_RESP_ERR)
-				mlx5_dbg(fp, MLX5_DBG_CQ_CQE, "poll_length, CQE response error, syndrome=0x%x, vendor syndrome error=0x%x, HW syndrome 0x%x, HW syndrome type 0x%x\n",
-					 ((struct mlx5_err_cqe *)cqe64)->syndrome,
-					 ((struct mlx5_err_cqe *)cqe64)->vendor_err_synd,
-					 ((struct mlx5_err_cqe *)cqe64)->hw_err_synd,
-					 ((struct mlx5_err_cqe *)cqe64)->hw_synd_type);
-			else
-				mlx5_dbg(fp, MLX5_DBG_CQ_CQE, "Only post-receive completion supported on poll_length, op=%u\n",
-					 cqe64->op_own >> 4);
-			err = CQ_POLL_ERR;
-			goto out;
-		}
-		cur_rsc = find_rsc(cq, cqe64, cqe_ver);
 		if (unlikely(!cur_rsc)) {
 			mlx5_dbg(fp, MLX5_DBG_CQ_CQE, "Failed to find QP resource on poll_length\n");
 			err = CQ_POLL_ERR;
@@ -1337,7 +1483,6 @@ static inline int32_t poll_length(struct ibv_cq *ibcq, void *buf, uint32_t *inl,
 		}
 
 		if (cur_rsc->type == MLX5_RSC_TYPE_MP_RWQ) {
-			uint32_t byte_cnt;
 			uint16_t wqe_id;
 
 			if (unlikely(!offset)) {
@@ -1347,7 +1492,6 @@ static inline int32_t poll_length(struct ibv_cq *ibcq, void *buf, uint32_t *inl,
 			}
 			rwq = (struct mlx5_rwq *)cur_rsc;
 
-			byte_cnt = ntohl(cqe64->byte_cnt);
 			wqe_id = ntohs(cqe64->wqe_id) & (rwq->rq.wqe_cnt - 1);
 			/* Add the WQE strides consumed by this CQE to the WQE consumed strides counter */
 			rwq->consumed_strides_counter[wqe_id] += (byte_cnt & MP_RQ_NUM_STRIDES_FIELD_MASK) >>
@@ -1404,7 +1548,7 @@ static inline int32_t poll_length(struct ibv_cq *ibcq, void *buf, uint32_t *inl,
 				}
 			}
 
-			size = ntohl(cqe64->byte_cnt);
+			size = byte_cnt;
 
 			if (unlikely(cqe_format)) {
 				void *data = (cqe_format == MLX5_INLINE_DATA32_SEG) ? cqe64 : cqe64 - 1;

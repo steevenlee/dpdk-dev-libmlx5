@@ -1883,17 +1883,17 @@ int mlx5_post_task(struct ibv_context *context,
 
 static inline int send_pending(struct ibv_qp *ibqp, uint64_t addr,
 			       uint32_t length, uint32_t lkey,
-			       uint32_t flags,
+			       uint32_t flags, uint16_t *vlan_tci,
 			       const int use_raw_eth, const int use_inl,
 			       const int thread_safe, const int use_sg_list,
-			       const int use_mpw,
+			       const int use_mpw, const int use_vlan_ins,
 			       const int num_sge, struct ibv_sge *sg_list) __attribute__((always_inline));
 static inline int send_pending(struct ibv_qp *ibqp, uint64_t addr,
 			       uint32_t length, uint32_t lkey,
-			       uint32_t flags,
+			       uint32_t flags, uint16_t *vlan_tci,
 			       const int use_raw_eth, const int use_inl,
 			       const int thread_safe, const int use_sg_list,
-			       const int use_mpw,
+			       const int use_mpw, const int use_vlan_ins,
 			       const int num_sge, struct ibv_sge *sg_list)
 
 {
@@ -1905,6 +1905,10 @@ static inline int send_pending(struct ibv_qp *ibqp, uint64_t addr,
 	int uninitialized_var(size);
 	uint8_t fm_ce_se;
 	int i;
+
+	/* mpw with vlan insertion not supported */
+	if (use_mpw && use_vlan_ins)
+		return EPERM;
 
 	if (thread_safe)
 		mlx5_lock(&qp->sq.lock);
@@ -1980,8 +1984,12 @@ static inline int send_pending(struct ibv_qp *ibqp, uint64_t addr,
 		lkey = sg_list[0].lkey;
 	}
 
-	/* Start new WQE if there is no open multi-packet WQE */
-	if ((use_inl && (qp->mpw.state != MLX5_MPW_STATE_OPENED_INL)) ||
+	/*
+	 * Start new WQE if there is no open multi-packet WQE,
+	 * or if using vlan insertion which not support multi-packet.
+	 */
+	if (use_vlan_ins ||
+	    (use_inl && (qp->mpw.state != MLX5_MPW_STATE_OPENED_INL)) ||
 	    (!use_inl && (qp->mpw.state != MLX5_MPW_STATE_OPENED))) {
 		start = mlx5_get_send_wqe(qp, qp->gen_data.scur_post & (qp->sq.wqe_cnt - 1));
 
@@ -2010,17 +2018,43 @@ static inline int send_pending(struct ibv_qp *ibqp, uint64_t addr,
 									    (size * 4));
 				}
 			} else {
-				eseg->inline_hdr_sz = htons(MLX5_ETH_INLINE_HEADER_SIZE);
+				if (use_vlan_ins) {
+					uint32_t vlan;
 
-				/* We don't support header divided in several sges */
-				if (unlikely(length <= MLX5_ETH_INLINE_HEADER_SIZE))
-					return EINVAL;
+					eseg->inline_hdr_sz = htons(MLX5_ETH_VLAN_INLINE_HEADER_SIZE);
 
-				/* Copy the first 16 bytes into the inline header */
-				memcpy(eseg->inline_hdr_start, (void *)(uintptr_t)addr,
-				       MLX5_ETH_INLINE_HEADER_SIZE);
-				addr += MLX5_ETH_INLINE_HEADER_SIZE;
-				length -= MLX5_ETH_INLINE_HEADER_SIZE;
+					/* We don't support header divided in several sges */
+					if (unlikely(length <= MLX5_ETH_VLAN_INLINE_HEADER_SIZE - sizeof(vlan)))
+						return EINVAL;
+
+					vlan = htonl(0x81000000 | *vlan_tci);
+
+					/*
+					 * Copy 12 bytes of source & destination MAC address.
+					 * Copy 4 bytes of vlan.
+					 * Copy 2 bytes of ether type.
+					 */
+					memcpy((void *)(uintptr_t)eseg->inline_hdr_start, (void *)(uintptr_t)addr, 12);
+					memcpy((void *)((uintptr_t)eseg->inline_hdr_start + 12), &vlan, sizeof(vlan));
+					memcpy((void *)((uintptr_t)eseg->inline_hdr_start + 16), (void *)(uintptr_t)addr + 12, 2);
+
+					/* We copied only 14 bytes from addr */
+					addr += MLX5_ETH_VLAN_INLINE_HEADER_SIZE - sizeof(vlan);
+					length -= MLX5_ETH_VLAN_INLINE_HEADER_SIZE - sizeof(vlan);
+				} else {
+					eseg->inline_hdr_sz = htons(MLX5_ETH_INLINE_HEADER_SIZE);
+
+					/* We don't support header divided in several sges */
+					if (unlikely(length <= MLX5_ETH_INLINE_HEADER_SIZE))
+						return EINVAL;
+
+					/* Copy the first 16 bytes into the inline header */
+					memcpy(eseg->inline_hdr_start, (void *)(uintptr_t)addr,
+					       MLX5_ETH_INLINE_HEADER_SIZE);
+
+					addr += MLX5_ETH_INLINE_HEADER_SIZE;
+					length -= MLX5_ETH_INLINE_HEADER_SIZE;
+				}
 				size = (sizeof(struct mlx5_wqe_ctrl_seg) +
 					sizeof(struct mlx5_wqe_eth_seg)) / 16;
 				dseg = (struct mlx5_wqe_data_seg *)(++eseg);
@@ -2083,7 +2117,8 @@ static inline int send_pending(struct ibv_qp *ibqp, uint64_t addr,
 			qp->mpw.last_dseg = dseg;
 	}
 
-	if ((use_inl && (qp->mpw.state != MLX5_MPW_STATE_OPENED_INL)) ||
+	if (use_vlan_ins ||
+	    (use_inl && (qp->mpw.state != MLX5_MPW_STATE_OPENED_INL)) ||
 	    (!use_inl && (qp->mpw.state != MLX5_MPW_STATE_OPENED))) {
 		/* Fill ctrl-segment of a new WQE */
 		fm_ce_se = qp->ctrl_seg.fm_ce_se_acc[flags & (IBV_EXP_QP_BURST_SOLICITED |
@@ -2158,10 +2193,10 @@ static int mlx5_send_pending_safe(struct ibv_qp *qp, uint64_t addr,
 	int raw_eth = mqp->gen_data_warm.qp_type == IBV_QPT_RAW_PACKET &&
 		      mqp->link_layer == IBV_LINK_LAYER_ETHERNET;
 
-			/*  qp, addr, length, lkey, flags, raw_eth, inl, safe,	*/
-	return send_pending(qp, addr, length, lkey, flags, raw_eth, 0,   1,
-			/*  use_sg, use_mpw, num_sge, sg_list		*/
-			    0,      0,       0,       NULL);
+			/*  qp, addr, length, lkey, flags, vlan, raw_eth, inl, safe, */
+	return send_pending(qp, addr, length, lkey, flags, NULL,     raw_eth, 0,   1,
+			/*  use_sg, use_mpw, use_vlan, num_sge, sg_list	*/
+			    0,      0,       0,	       0,       NULL);
 }
 
 static int mlx5_send_pending_mpw_safe(struct ibv_qp *qp, uint64_t addr,
@@ -2175,11 +2210,35 @@ static int mlx5_send_pending_mpw_safe(struct ibv_qp *qp, uint64_t addr,
 	int raw_eth = mqp->gen_data_warm.qp_type == IBV_QPT_RAW_PACKET &&
 		      mqp->link_layer == IBV_LINK_LAYER_ETHERNET;
 
-			/*  qp, addr, length, lkey, flags, raw_eth, inl, safe,	*/
-	return send_pending(qp, addr, length, lkey, flags, raw_eth, 0,   1,
-			/*  use_sg, use_mpw, num_sge, sg_list		*/
-			    0,      1,       0,       NULL);
+			/*  qp, addr, length, lkey, flags, vlan, raw_eth, inl, safe, */
+	return send_pending(qp, addr, length, lkey, flags, NULL,     raw_eth, 0,   1,
+			/*  use_sg, use_mpw, use_vlan, num_sge, sg_list */
+			    0,      1,       0,	       0,       NULL);
 }
+
+#define MLX5_SEND_PENDING_VLAN_SAFE_NAME(mpw) mlx5_send_pending_vlan_safe_##mpw
+#define MLX5_SEND_PENDING_VLAN_SAFE(mpw)							\
+	static int MLX5_SEND_PENDING_VLAN_SAFE_NAME(mpw)(					\
+					struct ibv_qp *qp, uint64_t addr,			\
+					uint32_t length, uint32_t lkey,				\
+					uint32_t flags, uint16_t *vlan_tci) __MLX5_ALGN_F__;	\
+	static int MLX5_SEND_PENDING_VLAN_SAFE_NAME(mpw)(					\
+					struct ibv_qp *qp, uint64_t addr,			\
+					uint32_t length, uint32_t lkey,				\
+					uint32_t flags, uint16_t *vlan_tci)			\
+	{											\
+		struct mlx5_qp *mqp = to_mqp(qp);						\
+		int raw_eth = mqp->gen_data_warm.qp_type == IBV_QPT_RAW_PACKET &&		\
+		      mqp->link_layer == IBV_LINK_LAYER_ETHERNET;				\
+												\
+		/*                  qp, addr, length, lkey, flags, vlan,     eth, */		\
+		return send_pending(qp, addr, length, lkey, flags, vlan_tci, raw_eth,		\
+			/*  inl, safe,  use_sg, use_mpw, use_vlan, num_sge, sg_list */		\
+			    0,   1,     0,      mpw,     1,    	   0,       NULL);		\
+	}
+/*			    mpw */
+MLX5_SEND_PENDING_VLAN_SAFE(0);
+MLX5_SEND_PENDING_VLAN_SAFE(1);
 
 #define MLX5_SEND_PENDING_UNSAFE_NAME(eth, mpw) mlx5_send_pending_unsafe_##eth##mpw
 #define MLX5_SEND_PENDING_UNSAFE(eth, mpw)					\
@@ -2192,16 +2251,40 @@ static int mlx5_send_pending_mpw_safe(struct ibv_qp *qp, uint64_t addr,
 					uint32_t length, uint32_t lkey,		\
 					uint32_t flags)				\
 	{									\
-		/*                  qp, addr, length, lkey, flags, eth, inl, */	\
-		return send_pending(qp, addr, length, lkey, flags, eth, 0,	\
-				/*  safe,  use_sg, use_mpw, num_sge, sg_list */	\
-				    0,     0,      mpw,     0,       NULL);	\
+		/*                  qp, addr, length, lkey, flags, */		\
+		return send_pending(qp, addr, length, lkey, flags, 		\
+				/*  vlan, eth, inl, safe,  use_sg, */		\
+				    NULL, eth, 0,   0,     0,  			\
+				/*  use_mpw, use_vlan, num_sge, sg_list */	\
+				    mpw,     0,	       0,       NULL);		\
 	}
 /*			eth mpw */
 MLX5_SEND_PENDING_UNSAFE(0,  0);
 MLX5_SEND_PENDING_UNSAFE(0,  1);
 MLX5_SEND_PENDING_UNSAFE(1,  0);
 MLX5_SEND_PENDING_UNSAFE(1,  1);
+
+#define MLX5_SEND_PENDING_VLAN_UNSAFE_NAME(mpw) mlx5_send_pending_vlan_unsafe_##mpw
+#define MLX5_SEND_PENDING_VLAN_UNSAFE(mpw)						\
+	static int MLX5_SEND_PENDING_VLAN_UNSAFE_NAME(mpw)(				\
+					struct ibv_qp *qp, uint64_t addr,		\
+					uint32_t length, uint32_t lkey,	uint32_t flags,	\
+					uint16_t *vlan_tci) __MLX5_ALGN_F__;		\
+	static int MLX5_SEND_PENDING_VLAN_UNSAFE_NAME(mpw)(				\
+					struct ibv_qp *qp, uint64_t addr,		\
+					uint32_t length, uint32_t lkey,	uint32_t flags,	\
+					uint16_t *vlan_tci)				\
+	{										\
+		/*                  qp, addr, length, lkey, flags, */			\
+		return send_pending(qp, addr, length, lkey, flags,			\
+				 /* vlan,     eth, inl, safe,  use_sg*/			\
+				    vlan_tci, 1,   0,   0,     0,			\
+				 /* use_mpw, use_vlan, num_sge, sg_list */		\
+				    mpw,     1,	       0,       NULL);			\
+	}
+/*			      mpw */
+MLX5_SEND_PENDING_VLAN_UNSAFE(0);
+MLX5_SEND_PENDING_VLAN_UNSAFE(1);
 
 /* burst family - send_pending_inline */
 static int mlx5_send_pending_inl_safe(struct ibv_qp *qp, void *addr,
@@ -2213,10 +2296,10 @@ static int mlx5_send_pending_inl_safe(struct ibv_qp *qp, void *addr,
 	int raw_eth = mqp->gen_data_warm.qp_type == IBV_QPT_RAW_PACKET &&
 		      mqp->link_layer == IBV_LINK_LAYER_ETHERNET;
 
-			/*  qp, addr,            length, lkey, flags, raw_eth,	*/
-	return send_pending(qp, (uintptr_t)addr, length, 0,    flags, raw_eth,
-			/*  inl, safe,  use_sg, use_mpw, num_sge, sg_list	*/
-			    1,   1,     0,      0,       0,       NULL);
+			/*  qp, addr,            length, lkey, flags, vlan, raw_eth, */
+	return send_pending(qp, (uintptr_t)addr, length, 0,    flags, NULL, raw_eth,
+			/*  inl, safe,  use_sg, use_mpw, use_vlan, num_sge, sg_list	*/
+			    1,   1,     0,      0,       0,	   0,       NULL);
 }
 
 static int mlx5_send_pending_inl_mpw_safe(struct ibv_qp *qp, void *addr,
@@ -2228,11 +2311,34 @@ static int mlx5_send_pending_inl_mpw_safe(struct ibv_qp *qp, void *addr,
 	int raw_eth = mqp->gen_data_warm.qp_type == IBV_QPT_RAW_PACKET &&
 		      mqp->link_layer == IBV_LINK_LAYER_ETHERNET;
 
-			/*  qp, addr,            length, lkey, flags, raw_eth,	*/
-	return send_pending(qp, (uintptr_t)addr, length, 0,    flags, raw_eth,
-			/*  inl, safe,  use_sg, use_mpw, num_sge, sg_list	*/
-			    1,   1,     0,      1,       0,       NULL);
+			/*  qp, addr,            length, lkey, flags, vlan, raw_eth, */
+	return send_pending(qp, (uintptr_t)addr, length, 0,    flags, NULL, raw_eth,
+			/*  inl, safe,  use_sg, use_mpw, use_vlan, num_sge, sg_list	*/
+			    1,   1,     0,      1,       0,	   0,       NULL);
 }
+
+#define MLX5_SEND_PENDING_INL_VLAN_SAFE_NAME(mpw) mlx5_send_pending_inl_vlan_safe_##mpw
+#define MLX5_SEND_PENDING_INL_VLAN_SAFE(mpw)							\
+	static int MLX5_SEND_PENDING_INL_VLAN_SAFE_NAME(mpw)(					\
+					struct ibv_qp *qp, void *addr, uint32_t length,		\
+					uint32_t flags, uint16_t *vlan_tci) __MLX5_ALGN_F__;	\
+	static int MLX5_SEND_PENDING_INL_VLAN_SAFE_NAME(mpw)(					\
+					struct ibv_qp *qp, void *addr, uint32_t length,		\
+					uint32_t flags, uint16_t *vlan_tci)			\
+	{											\
+		struct mlx5_qp *mqp = to_mqp(qp);						\
+		int raw_eth = mqp->gen_data_warm.qp_type == IBV_QPT_RAW_PACKET &&		\
+		      mqp->link_layer == IBV_LINK_LAYER_ETHERNET;				\
+		/*                  qp, addr, 		 length, lkey, */			\
+		return send_pending(qp, (uintptr_t)addr, length, 0,				\
+				/*  flags, vlan,     eth,     inl, safe, use_sg, */		\
+				    flags, vlan_tci, raw_eth, 1,   1,    0,			\
+				/*  use_mpw, use_vlan, num_sge, sg_list */			\
+				    mpw,     1,	       0,       NULL);				\
+	}
+/*				mpw */
+MLX5_SEND_PENDING_INL_VLAN_SAFE(0);
+MLX5_SEND_PENDING_INL_VLAN_SAFE(1);
 
 #define MLX5_SEND_PENDING_INL_UNSAFE_NAME(eth, mpw) mlx5_send_pending_inl_unsafe_##eth##mpw
 #define MLX5_SEND_PENDING_INL_UNSAFE(eth, mpw)							\
@@ -2243,16 +2349,36 @@ static int mlx5_send_pending_inl_mpw_safe(struct ibv_qp *qp, void *addr,
 					struct ibv_qp *qp, void *addr,				\
 					uint32_t length, uint32_t flags)			\
 	{											\
-		/*                  qp, addr,            length, lkey, flags, eth, inl, */	\
-		return send_pending(qp, (uintptr_t)addr, length, 0,    flags, eth, 1,		\
-				/*  safe,  use_sg, use_mpw, num_sge, sg_list */			\
-				    0,     0,      mpw,     0,       NULL);			\
+		/*                  qp, addr,            length, lkey, flags, vlan, eth, inl, */\
+		return send_pending(qp, (uintptr_t)addr, length, 0,    flags, NULL, eth, 1,	\
+				/*  safe,  use_sg, use_mpw, use_vlan, num_sge, sg_list */	\
+				    0,     0,      mpw,     0,	      0,       NULL);		\
 	}
 /*			    eth mpw */
 MLX5_SEND_PENDING_INL_UNSAFE(0, 0);
 MLX5_SEND_PENDING_INL_UNSAFE(0, 1);
 MLX5_SEND_PENDING_INL_UNSAFE(1, 0);
 MLX5_SEND_PENDING_INL_UNSAFE(1, 1);
+
+#define MLX5_SEND_PENDING_INL_VLAN_UNSAFE_NAME(mpw) mlx5_send_pending_inl_unsafe_##mpw
+#define MLX5_SEND_PENDING_INL_VLAN_UNSAFE(mpw)							\
+	static int MLX5_SEND_PENDING_INL_VLAN_UNSAFE_NAME(mpw)(					\
+					struct ibv_qp *qp, void *addr, uint32_t length,		\
+					uint32_t flags, uint16_t *vlan_tci) __MLX5_ALGN_F__;	\
+	static int MLX5_SEND_PENDING_INL_VLAN_UNSAFE_NAME(mpw)(					\
+					struct ibv_qp *qp, void *addr, uint32_t length,		\
+					uint32_t flags, uint16_t *vlan_tci)			\
+	{											\
+		/*                  qp, addr,            length, lkey, flags, */		\
+		return send_pending(qp, (uintptr_t)addr, length, 0,    flags,			\
+				/*  vlan,     eth, inl, safe, use_sg, */			\
+				    vlan_tci, 1,   1,	0,    0,				\
+				/*  use_mpw, use_vlan, num_sge, sg_list */			\
+				    mpw,     1,	       0,       NULL);				\
+	}
+/*			    	  mpw */
+MLX5_SEND_PENDING_INL_VLAN_UNSAFE(0);
+MLX5_SEND_PENDING_INL_VLAN_UNSAFE(1);
 
 /* burst family - send_pending_sg_list */
 static int mlx5_send_pending_sg_list_safe(
@@ -2265,10 +2391,10 @@ static int mlx5_send_pending_sg_list_safe(
 	struct mlx5_qp *mqp = to_mqp(ibqp);
 	int raw_eth = mqp->gen_data_warm.qp_type == IBV_QPT_RAW_PACKET && mqp->link_layer == IBV_LINK_LAYER_ETHERNET;
 
-			/*  qp,   addr, length, lkey, flags, raw_eth, inl,	*/
-	return send_pending(ibqp, 0,    0,      0,    flags, raw_eth, 0,
-			/*  safe,  use_sg, use_mpw, num_sge, sg_list */
-			    1,     1,      0,       num,     sg_list);
+			/*  qp,   addr, length, lkey, flags, vlan, raw_eth, inl,	*/
+	return send_pending(ibqp, 0,    0,      0,    flags, NULL, raw_eth, 0,
+			/*  safe,  use_sg, use_mpw, use_vlan, num_sge, sg_list */
+			    1,     1,      0,       0,	      num,     sg_list);
 }
 
 static int mlx5_send_pending_sg_list_mpw_safe(
@@ -2281,11 +2407,37 @@ static int mlx5_send_pending_sg_list_mpw_safe(
 	struct mlx5_qp *mqp = to_mqp(ibqp);
 	int raw_eth = mqp->gen_data_warm.qp_type == IBV_QPT_RAW_PACKET && mqp->link_layer == IBV_LINK_LAYER_ETHERNET;
 
-			/*  qp,   addr, length, lkey, flags, raw_eth, inl,	*/
-	return send_pending(ibqp, 0,    0,      0,    flags, raw_eth, 0,
-			/*  safe,  use_sg, use_mpw, num_sge, sg_list */
-			    1,     1,      1,       num,     sg_list);
+			/*  qp,   addr, length, lkey, flags, vlan, raw_eth, inl, */
+	return send_pending(ibqp, 0,    0,      0,    flags, NULL,     raw_eth, 0,
+			/*  safe,  use_sg, use_mpw, use_vlan, num_sge, sg_list */
+			    1,     1,      1,       0,	      num,     sg_list);
 }
+
+#define MLX5_SEND_PENDING_SG_VLAN_SAFE_NAME(mpw) mlx5_send_pending_sg_list_vlan_safe_##mpw
+#define MLX5_SEND_PENDING_SG_VLAN_SAFE(mpw)							\
+	static int MLX5_SEND_PENDING_SG_VLAN_SAFE_NAME(mpw)(					\
+					struct ibv_qp *ibqp, struct ibv_sge *sg_list,		\
+					uint32_t num, uint32_t flags,				\
+					uint16_t *vlan_tci) __MLX5_ALGN_F__;			\
+	static int MLX5_SEND_PENDING_SG_VLAN_SAFE_NAME(mpw)(					\
+					struct ibv_qp *ibqp, struct ibv_sge *sg_list,		\
+					uint32_t num, uint32_t flags,				\
+					uint16_t *vlan_tci)					\
+	{											\
+		struct mlx5_qp *mqp = to_mqp(ibqp);						\
+		int raw_eth = mqp->gen_data_warm.qp_type == IBV_QPT_RAW_PACKET &&		\
+		      mqp->link_layer == IBV_LINK_LAYER_ETHERNET;				\
+												\
+		/*                  qp,   addr, length, lkey, */				\
+		return send_pending(ibqp, 0, 	0, 	0,					\
+				/*  flags, vlan,     eth,     inl, safe, use_sg, */		\
+				    flags, vlan_tci, raw_eth, 0,   1,    1,			\
+				/*  use_mpw, use_vlan, num_sge, sg_list */			\
+				    mpw,     1,	       num,     sg_list);			\
+	}
+/*				mpw */
+MLX5_SEND_PENDING_SG_VLAN_SAFE(0);
+MLX5_SEND_PENDING_SG_VLAN_SAFE(1);
 
 #define MLX5_SEND_PENDING_SG_LIST_UNSAFE_NAME(eth, mpw) mlx5_send_pending_sg_list_unsafe_##eth##mpw
 #define MLX5_SEND_PENDING_SG_LIST_UNSAFE(eth, mpw)						\
@@ -2296,16 +2448,38 @@ static int mlx5_send_pending_sg_list_mpw_safe(
 					struct ibv_qp *ibqp, struct ibv_sge *sg_list,		\
 					uint32_t num, uint32_t flags)				\
 	{											\
-				/*  qp,   addr, length, lkey, flags, eth, inl, */		\
-		return send_pending(ibqp, 0,    0,      0,    flags, eth, 0,			\
-				/*  safe,  use_sg, use_mpw, num_sge, sg_list */			\
-				    0,     1,      mpw,     num,     sg_list);			\
+				/*  qp,   addr, length, lkey, flags, vlan, eth, inl, */		\
+		return send_pending(ibqp, 0,    0,      0,    flags, NULL,     eth, 0,		\
+				/*  safe,  use_sg, use_mpw, use_vlan, num_sge, sg_list */	\
+				    0,     1,      mpw,     0,	      num,     sg_list);	\
 	}
 /*				eth mpw */
 MLX5_SEND_PENDING_SG_LIST_UNSAFE(0,  0);
 MLX5_SEND_PENDING_SG_LIST_UNSAFE(0,  1);
 MLX5_SEND_PENDING_SG_LIST_UNSAFE(1,  0);
 MLX5_SEND_PENDING_SG_LIST_UNSAFE(1,  1);
+
+#define MLX5_SEND_PENDING_SG_VLAN_UNSAFE_NAME(mpw) mlx5_send_pending_sg_list_unsafe_##mpw
+#define MLX5_SEND_PENDING_SG_VLAN_UNSAFE(mpw)						\
+	static int MLX5_SEND_PENDING_SG_VLAN_UNSAFE_NAME(mpw)(				\
+					struct ibv_qp *ibqp, struct ibv_sge *sg_list,	\
+					uint32_t num, uint32_t flags,			\
+					uint16_t *vlan_tci) __MLX5_ALGN_F__;		\
+	static int MLX5_SEND_PENDING_SG_VLAN_UNSAFE_NAME(mpw)(				\
+					struct ibv_qp *ibqp, struct ibv_sge *sg_list,	\
+					uint32_t num, uint32_t flags,			\
+					uint16_t *vlan_tci)				\
+	{										\
+				/*  qp,   addr, length, lkey, flags, */			\
+		return send_pending(ibqp, 0,    0,      0,    flags,			\
+				/*  vlan, eth, inl, safe,  use_sg, */			\
+				    vlan_tci, 1,   0,	0,     1,			\
+				/*  use_mpw, use_vlan, num_sge, sg_list */		\
+				    mpw,     1,	       num,     sg_list);		\
+	}
+/*				 mpw */
+MLX5_SEND_PENDING_SG_VLAN_UNSAFE(0);
+MLX5_SEND_PENDING_SG_VLAN_UNSAFE(1);
 
 /* burst family - send_burst */
 static inline int send_flush_unsafe(struct ibv_qp *ibqp, const int db_method) __attribute__((always_inline));
@@ -2326,10 +2500,10 @@ static inline int send_msg_list(struct ibv_qp *ibqp, struct ibv_sge *sg_list, ui
 	for (i = 0; i < num; i++, sg_list++)
 			/*   qp,   addr,          length,          lkey,	*/
 		send_pending(ibqp, sg_list->addr, sg_list->length, sg_list->lkey,
-			/*   flags, raw_eth, inl, safe,  use_sg,		*/
-			     flags, raw_eth, 0,   0,     0,
-			/*   use_mpw, num_sge, sg_list				*/
-			     mpw,       0,       NULL);
+			/*   flags, vlan, raw_eth, inl, safe,  use_sg,	*/
+			     flags, NULL, raw_eth, 0,   0,     0,
+			/*   use_mpw, use_vlan, num_sge, sg_list	*/
+			     mpw,     0,	0,       NULL);
 
 	/* use send_flush_unsafe since lock is already taken if needed */
 	send_flush_unsafe(ibqp, db_method);
@@ -2553,22 +2727,28 @@ MLX5_RECV_BURST_UNSAFE(1);
 /*
  * qp_burst family implementation for safe QP
  */
-struct ibv_exp_qp_burst_family mlx5_qp_burst_family_safe = {
+struct ibv_exp_qp_burst_family_v1 mlx5_qp_burst_family_safe = {
 		.send_burst = mlx5_send_burst_safe,
 		.send_pending = mlx5_send_pending_safe,
 		.send_pending_inline = mlx5_send_pending_inl_safe,
 		.send_pending_sg_list = mlx5_send_pending_sg_list_safe,
 		.send_flush = mlx5_send_flush_safe,
-		.recv_burst = mlx5_recv_burst_safe
+		.recv_burst = mlx5_recv_burst_safe,
+		.send_pending_vlan = MLX5_SEND_PENDING_VLAN_SAFE_NAME(0),
+		.send_pending_inline_vlan = MLX5_SEND_PENDING_INL_VLAN_SAFE_NAME(0),
+		.send_pending_sg_list_vlan = MLX5_SEND_PENDING_SG_VLAN_SAFE_NAME(0)
 };
 
-struct ibv_exp_qp_burst_family mlx5_qp_burst_family_mpw_safe = {
+struct ibv_exp_qp_burst_family_v1 mlx5_qp_burst_family_mpw_safe = {
 		.send_burst = mlx5_send_burst_mpw_safe,
 		.send_pending = mlx5_send_pending_mpw_safe,
 		.send_pending_inline = mlx5_send_pending_inl_mpw_safe,
 		.send_pending_sg_list = mlx5_send_pending_sg_list_mpw_safe,
 		.send_flush = mlx5_send_flush_safe,
-		.recv_burst = mlx5_recv_burst_safe
+		.recv_burst = mlx5_recv_burst_safe,
+		.send_pending_vlan = MLX5_SEND_PENDING_VLAN_SAFE_NAME(1),
+		.send_pending_inline_vlan = MLX5_SEND_PENDING_INL_VLAN_SAFE_NAME(1),
+		.send_pending_sg_list_vlan = MLX5_SEND_PENDING_SG_VLAN_SAFE_NAME(1)
 };
 
 /*
@@ -2596,8 +2776,11 @@ struct ibv_exp_qp_burst_family mlx5_qp_burst_family_mpw_safe = {
 		.send_pending_sg_list	= MLX5_SEND_PENDING_SG_LIST_UNSAFE_NAME(eth, mpw),	\
 		.send_flush		= MLX5_SEND_FLUSH_UNSAFE_NAME(db_method),		\
 		.recv_burst		= MLX5_RECV_BURST_UNSAFE_NAME(_1sge),			\
+		.send_pending_vlan 	= MLX5_SEND_PENDING_VLAN_UNSAFE_NAME(mpw),		\
+		.send_pending_inline_vlan  = MLX5_SEND_PENDING_INL_VLAN_UNSAFE_NAME(mpw),	\
+		.send_pending_sg_list_vlan = MLX5_SEND_PENDING_SG_VLAN_UNSAFE_NAME(mpw),	\
 	}
-static struct ibv_exp_qp_burst_family mlx5_qp_burst_family_unsafe_tbl[1 << 5] = {
+static struct ibv_exp_qp_burst_family_v1 mlx5_qp_burst_family_unsafe_tbl[1 << 5] = {
 		MLX5_QP_BURST_UNSAFE_TBL_ENTRY(MLX5_DB_METHOD_DEDIC_BF_1_THREAD, 0, 0, 0),
 		MLX5_QP_BURST_UNSAFE_TBL_ENTRY(MLX5_DB_METHOD_DEDIC_BF_1_THREAD, 0, 0, 1),
 		MLX5_QP_BURST_UNSAFE_TBL_ENTRY(MLX5_DB_METHOD_DEDIC_BF_1_THREAD, 0, 1, 0),
@@ -2632,12 +2815,12 @@ static struct ibv_exp_qp_burst_family mlx5_qp_burst_family_unsafe_tbl[1 << 5] = 
 		MLX5_QP_BURST_UNSAFE_TBL_ENTRY(MLX5_DB_METHOD_DB,                1, 1, 1),
 };
 
-struct ibv_exp_qp_burst_family *mlx5_get_qp_burst_family(struct mlx5_qp *qp,
+struct ibv_exp_qp_burst_family_v1 *mlx5_get_qp_burst_family(struct mlx5_qp *qp,
 							 struct ibv_exp_query_intf_params *params,
 							 enum ibv_exp_query_intf_status *status)
 {
 	enum ibv_exp_query_intf_status ret = IBV_EXP_INTF_STAT_OK;
-	struct ibv_exp_qp_burst_family *family = NULL;
+	struct ibv_exp_qp_burst_family_v1 *family = NULL;
 	uint32_t unsupported_f;
 	int mpw;
 

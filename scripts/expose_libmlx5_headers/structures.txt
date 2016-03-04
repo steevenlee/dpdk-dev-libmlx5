@@ -34,10 +34,10 @@ mpw_data
 general_data_warm
 odp_data
 mlx5_wq_recv_send_enable
+mlx5_mini_cqe8
 mlx5_cq
 mlx5_srq
 mlx5_wq
 mlx5_bf
 mlx5_qp
 mlx5_ah
-mlx5_mini_cqe8
