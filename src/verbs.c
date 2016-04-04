@@ -672,11 +672,16 @@ static struct ibv_cq *create_cq(struct ibv_context *context,
 		cmd_e.cqe_size = cqe_sz;
 		cmd_e.size_of_prefix = offsetof(struct mlx5_exp_create_cq,
 						prefix_reserved);
-		cmd_e.exp_data.comp_mask = MLX5_EXP_CREATE_CQ_MASK_CQE_COMP_EN |
-					   MLX5_EXP_CREATE_CQ_MASK_CQE_COMP_RECV_TYPE;
-		if (mctx->cqe_comp_max_num) {
-			cmd_e.exp_data.cqe_comp_en = mctx->enable_cqe_comp ? 1 : 0;
-			cmd_e.exp_data.cqe_comp_recv_type = MLX5_CQE_FORMAT_HASH;
+		if (attr->comp_mask & IBV_EXP_CQ_INIT_ATTR_COMP_EN) {
+			cmd_e.exp_data.comp_mask = MLX5_EXP_CREATE_CQ_MASK_CQE_COMP_EN |
+						   MLX5_EXP_CREATE_CQ_MASK_CQE_COMP_RECV_TYPE;
+			if (mctx->cqe_comp_max_num) {
+				cmd_e.exp_data.cqe_comp_en = mctx->enable_cqe_comp ? 1 : 0;
+				cmd_e.exp_data.cqe_comp_recv_type = MLX5_CQE_FORMAT_HASH;
+			}
+		} else {
+			cmd_e.exp_data.cqe_comp_en = 0;
+			cmd_e.exp_data.comp_mask = 0;
 		}
 	} else {
 		cmd.buf_addr = (uintptr_t) cq->buf_a.buf;
