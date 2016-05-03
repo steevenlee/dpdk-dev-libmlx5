@@ -53,16 +53,28 @@
 #define MLX5_CHUNK_SIZE(calc)	64 * (1 << calc->log_chunk_size)
 #define MLX5_EC_NOUTPUTS(m)	(m == 3 ? 4 : m)
 
-struct mlx5_ec_decode {
+struct mlx5_ec_mat {
 	struct ibv_sge		sge;
 	struct list_head	node;
 };
 
-struct mlx5_ec_decode_pool {
+struct mlx5_ec_mat_pool {
 	struct mlx5_lock	lock;
-	uint8_t                 *decode_buf;
-	struct ibv_mr		*decode_mr;
-	struct mlx5_ec_decode	*decodes;
+	uint8_t                 *mat_buf;
+	struct ibv_mr		*mat_mr;
+	struct mlx5_ec_mat	*matrices;
+	struct list_head	list;
+};
+
+struct mlx5_ec_comp {
+	struct ibv_exp_ec_comp	*comp;
+	struct mlx5_ec_mat	*ec_mat;
+	struct list_head	node;
+};
+
+struct mlx5_ec_comp_pool {
+	struct mlx5_lock	lock;
+	struct mlx5_ec_comp	*comps;
 	struct list_head	list;
 };
 
@@ -79,7 +91,8 @@ struct mlx5_ec_calc {
 	struct ibv_mr		*inumr;
 	uint8_t			*mat;
 	struct ibv_mr		*mat_mr;
-	struct mlx5_ec_decode_pool decode_pool;
+	struct mlx5_ec_mat_pool mat_pool;
+	struct mlx5_ec_comp_pool comp_pool;
 	pthread_t		ec_poller;
 	int			stop_ec_poller;
 	uint8_t			*dump;
@@ -94,15 +107,16 @@ static inline struct mlx5_ec_calc *to_mcalc(struct ibv_exp_ec_calc *ec_calc)
 	return (void *)ec_calc - offsetof(struct mlx5_ec_calc, ibcalc);
 }
 
-struct mlx5_ec_comp {
+struct mlx5_ec_sync_comp {
 	struct ibv_exp_ec_comp	comp;
 	pthread_mutex_t		mutex;
 	pthread_cond_t		cond;
 };
 
-static inline struct mlx5_ec_comp *to_mcomp(struct ibv_exp_ec_comp *ec_comp)
+static inline struct mlx5_ec_sync_comp *
+to_mcomp(struct ibv_exp_ec_comp *ec_comp)
 {
-	return (void *)ec_comp - offsetof(struct mlx5_ec_comp, comp);
+	return (void *)ec_comp - offsetof(struct mlx5_ec_sync_comp, comp);
 }
 
 struct ibv_exp_ec_calc *
@@ -121,13 +135,13 @@ int mlx5_ec_encode_sync(struct ibv_exp_ec_calc *ec_calc,
 
 int mlx5_ec_decode_async(struct ibv_exp_ec_calc *ec_calc,
 			 struct ibv_exp_ec_mem *ec_mem,
-			 uint32_t erasures,
+			 uint8_t *erasures,
 			 uint8_t *decode_matrix,
 			 struct ibv_exp_ec_comp *ec_comp);
 
 int mlx5_ec_decode_sync(struct ibv_exp_ec_calc *ec_calc,
 			struct ibv_exp_ec_mem *ec_mem,
-			uint32_t erasures,
+			uint8_t *erasures,
 			uint8_t *decode_matrix);
 
 int mlx5_ec_poll(struct ibv_exp_ec_calc *ec_calc, int n);
@@ -136,4 +150,15 @@ int mlx5_ec_encode_send(struct ibv_exp_ec_calc *ec_calc,
 			struct ibv_exp_ec_mem *ec_mem,
 			struct ibv_exp_ec_stripe *data_stripes,
 			struct ibv_exp_ec_stripe *code_stripes);
+
+int mlx5_ec_update_async(struct ibv_exp_ec_calc *ec_calc,
+			 struct ibv_exp_ec_mem *ec_mem,
+			 uint8_t *data_updates,
+			 uint8_t *code_updates,
+			 struct ibv_exp_ec_comp *ec_comp);
+
+int mlx5_ec_update_sync(struct ibv_exp_ec_calc *ec_calc,
+			struct ibv_exp_ec_mem *ec_mem,
+			uint8_t *data_updates,
+			uint8_t *code_updates);
 #endif /* EC_H */

@@ -347,20 +347,37 @@ static void free_huge_buf(struct mlx5_context *ctx, struct mlx5_buf *buf)
 		mlx5_spin_unlock(&ctx->hugetlb_lock);
 }
 
-int mlx5_alloc_prefered_buf(struct mlx5_context *mctx,
-			    struct mlx5_buf *buf,
-			    size_t size, int page_size,
-			    enum mlx5_alloc_type type,
-			    const char *component)
+static int alloc_preferred_buf(struct mlx5_context *mctx,
+			       struct mlx5_buf *buf,
+			       size_t size, int page_size,
+			       enum mlx5_alloc_type type,
+			       const char *component)
 {
 	int ret;
 
 	/*
 	 * Fallback mechanism priority:
+	 *	peer memory
 	 *	huge pages
 	 *	contig pages
 	 *	default
 	 */
+	if (buf->peer.ctx) {
+		struct ibv_exp_peer_buf_alloc_attr attr;
+
+		attr.length = size;
+		attr.peer_id = buf->peer.ctx->peer_id;
+		attr.dir = buf->peer.dir;
+		buf->peer.pb = buf->peer.ctx->buf_alloc(&attr);
+		if (buf->peer.pb) {
+			buf->buf = buf->peer.pb->addr;
+			buf->length = size;
+			buf->type = MLX5_ALLOC_TYPE_PEER_DIRECT;
+
+			return 0;
+		}
+	}
+
 	if (type == MLX5_ALLOC_TYPE_HUGE ||
 	    type == MLX5_ALLOC_TYPE_PREFER_HUGE ||
 	    type == MLX5_ALLOC_TYPE_ALL) {
@@ -392,11 +409,47 @@ int mlx5_alloc_prefered_buf(struct mlx5_context *mctx,
 	return mlx5_alloc_buf(buf, size, page_size);
 }
 
+int mlx5_alloc_preferred_buf(struct mlx5_context *mctx,
+			     struct mlx5_buf *buf,
+			     size_t size, int page_size,
+			     enum mlx5_alloc_type type,
+			     const char *component)
+{
+	int ret = alloc_preferred_buf(mctx, buf, size, page_size,
+				      type, component);
+	if (ret)
+		return ret;
+
+	if (buf->peer.ctx &&
+	    buf->peer.ctx->register_va &&
+	    (buf->peer.dir & IBV_EXP_PEER_DIRECTION_FROM_PEER ||
+	     buf->peer.dir & IBV_EXP_PEER_DIRECTION_TO_PEER)) {
+		buf->peer.va_id = buf->peer.ctx->register_va(buf->buf, size,
+				  buf->peer.ctx->peer_id);
+		if (!buf->peer.va_id) {
+			mlx5_free_actual_buf(mctx, buf);
+			return -1;
+		}
+	}
+
+	return 0;
+}
+
 int mlx5_free_actual_buf(struct mlx5_context *ctx, struct mlx5_buf *buf)
 {
 	int err = 0;
 
+	if (buf->peer.va_id) {
+		buf->peer.ctx->unregister_va(buf->peer.va_id,
+					   buf->peer.ctx->peer_id);
+		buf->peer.va_id = 0;
+	}
+
 	switch (buf->type) {
+	case MLX5_ALLOC_TYPE_PEER_DIRECT:
+		buf->peer.ctx->buf_release(buf->peer.pb);
+		break;
+
 	case MLX5_ALLOC_TYPE_ANON:
 		mlx5_free_buf(buf);
 		break;

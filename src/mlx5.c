@@ -631,12 +631,19 @@ static void set_experimental(struct ibv_context *ctx)
 	verbs_set_exp_ctx_op(verbs_exp_ctx, ec_decode_sync, mlx5_ec_decode_sync);
 	verbs_set_exp_ctx_op(verbs_exp_ctx, ec_poll, mlx5_ec_poll);
 	verbs_set_exp_ctx_op(verbs_exp_ctx, ec_encode_send, mlx5_ec_encode_send);
+	verbs_set_exp_ctx_op(verbs_exp_ctx, ec_update_async, mlx5_ec_update_async);
+	verbs_set_exp_ctx_op(verbs_exp_ctx, ec_update_sync, mlx5_ec_update_sync);
 	if (mctx->cqe_version == 1)
 		verbs_set_exp_ctx_op(verbs_exp_ctx, drv_exp_ibv_poll_cq,
 				     mlx5_poll_cq_ex_1);
 	else
 		verbs_set_exp_ctx_op(verbs_exp_ctx, drv_exp_ibv_poll_cq,
 				     mlx5_poll_cq_ex);
+
+	verbs_set_exp_ctx_op(verbs_exp_ctx, exp_peer_commit_qp, mlx5_exp_peer_commit_qp);
+	verbs_set_exp_ctx_op(verbs_exp_ctx, exp_rollback_send, mlx5_exp_rollback_send);
+	verbs_set_exp_ctx_op(verbs_exp_ctx, exp_peer_peek_cq, mlx5_exp_peer_peek_cq);
+	verbs_set_exp_ctx_op(verbs_exp_ctx, exp_peer_abort_peek_cq, mlx5_exp_peer_abort_peek_cq);
 }
 
 void *mlx5_uar_mmap(int idx, int cmd, int page_size, int cmd_fd)

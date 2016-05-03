@@ -163,6 +163,14 @@ static inline int mlx5_get_cqe_format(struct mlx5_cqe64 *cqe)
 	return (cqe->op_own & MLX5E_CQE_FORMAT_MASK) >> 2;
 }
 
+#define LAST_PEEK_ENTRY (-1U)
+#define PEEK_ENTRY(cq, n) \
+	(n == LAST_PEEK_ENTRY ? NULL : \
+	((struct mlx5_peek_entry *)cq->peer_buf.buf) + n)
+#define PEEK_ENTRY_N(cq, pe) \
+	(pe == NULL ? LAST_PEEK_ENTRY : \
+	((pe - (struct mlx5_peek_entry *)cq->peer_buf.buf)))
+
 static void *get_buf_cqe(struct mlx5_buf *buf, int n, int cqe_sz)
 {
 	return buf->buf + n * cqe_sz;
@@ -198,13 +206,27 @@ static inline struct mlx5_cqe64 *get_next_cqe(struct mlx5_cq *cq, const int cqe_
 	if (unlikely(cq->compressed_left))
 		return &cq->next_decomp_cqe64;
 
+	if (unlikely(cq->peer_enabled)) {
+		struct mlx5_peek_entry *tmp;
+
+		while (cq->peer_peek_table[idx]) {
+			if (cq->peer_peek_table[idx]->busy) {
+				errno = EBUSY;
+				return NULL;
+			}
+			tmp = cq->peer_peek_table[idx];
+			cq->peer_peek_table[idx] = PEEK_ENTRY(cq, tmp->next);
+			tmp->next = PEEK_ENTRY_N(cq, cq->peer_peek_free);
+			cq->peer_peek_free = tmp;
+		}
+	}
+
 	cqe64 = (cqe_sz == 64) ? cqe : cqe + 64;
 
 	if (likely((cqe64->op_own) >> 4 != MLX5_CQE_INVALID) &&
 	    !((cqe64->op_own & MLX5_CQE_OWNER_MASK) ^ !!(cq->cons_index & (cq->ibv_cq.cqe + 1)))) {
 		return cqe64;
 	}
-
 	return NULL;
 }
 
@@ -1012,6 +1034,75 @@ static inline int mlx5_poll_one(struct mlx5_cq *cq,
 	return CQ_OK;
 }
 
+int mlx5_exp_peer_peek_cq(struct ibv_cq *ibcq,
+			  struct ibv_exp_peer_peek *peek_ctx)
+{
+	struct mlx5_cq *cq = to_mcq(ibcq);
+	struct peer_op_wr *wr = peek_ctx->storage;
+	struct mlx5_peek_entry *peek;
+	int entries = 2;
+	int n, cur_own;
+	void *cqe;
+	struct mlx5_cqe64 *cqe64;
+
+	if (!cq->peer_enabled)
+		return EINVAL;
+
+	if (peek_ctx->cqe_offset_from_head > cq->ibv_cq.cqe)
+		return E2BIG;
+
+	if (peek_ctx->entries < entries)
+		return ENOSPC;
+
+	mlx5_lock(&cq->lock);
+	n = cq->cons_index + peek_ctx->cqe_offset_from_head - 1;
+	cqe = cq->active_buf->buf + (n & cq->ibv_cq.cqe) * cq->cqe_sz;
+	cur_own = n & (cq->ibv_cq.cqe + 1);
+	cqe64 = (cq->cqe_sz == 64) ? cqe : cqe + 64;
+
+	if (cur_own) {
+		wr->type = IBV_EXP_PEER_OP_POLL_AND_DWORD;
+		wr->wr.dword_va.data = htonl(MLX5_CQE_OWNER_MASK);
+	} else {
+		wr->type = IBV_EXP_PEER_OP_POLL_NOR_DWORD;
+		wr->wr.dword_va.data = ~htonl(MLX5_CQE_OWNER_MASK);
+	}
+	wr->wr.dword_va.target_va = (uint32_t *)(uintptr_t)&cqe64->wqe_counter;
+	wr = wr->next;
+
+	peek = cq->peer_peek_free;
+	if (!peek) {
+		mlx5_unlock(&cq->lock);
+		return ENOMEM;
+	}
+	cq->peer_peek_free = PEEK_ENTRY(cq, peek->next);
+	peek->busy = 1;
+	peek->next = PEEK_ENTRY_N(cq, cq->peer_peek_table[n & cq->ibv_cq.cqe]);
+	cq->peer_peek_table[n & cq->ibv_cq.cqe] = peek;
+
+	wr->type = IBV_EXP_PEER_OP_STORE_DWORD;
+	wr->wr.dword_va.data = 0;
+	wr->wr.dword_va.target_va = &peek->busy;
+
+	peek_ctx->entries = entries;
+	peek_ctx->peek_id = (uintptr_t)peek;
+	mlx5_unlock(&cq->lock);
+
+	return 0;
+}
+
+int mlx5_exp_peer_abort_peek_cq(struct ibv_cq *ibcq,
+				struct ibv_exp_peer_abort_peek *peek_ctx)
+{
+	struct mlx5_cq *cq = to_mcq(ibcq);
+
+	if (!cq->peer_enabled)
+		return EINVAL;
+
+	((struct mlx5_peek_entry *)(uintptr_t)peek_ctx->peek_id)->busy = 0;
+	return 0;
+}
+
 static inline int poll_cq(struct ibv_cq *ibcq, int ne, struct ibv_exp_wc *wc,
 			  uint32_t wc_size, int cqe_ver) __attribute__((always_inline));
 static inline int poll_cq(struct ibv_cq *ibcq, int ne, struct ibv_exp_wc *wc,
@@ -1305,15 +1396,22 @@ int mlx5_alloc_cq_buf(struct mlx5_context *mctx, struct mlx5_cq *cq,
 	if (mlx5_use_huge(&mctx->ibv_ctx, "HUGE_CQ"))
 		default_type = MLX5_ALLOC_TYPE_HUGE;
 
+	if (cq->peer_enabled && cq->peer_ctx->buf_alloc) {
+		buf->peer.dir = IBV_EXP_PEER_DIRECTION_FROM_HCA |
+			      IBV_EXP_PEER_DIRECTION_TO_PEER |
+			      IBV_EXP_PEER_DIRECTION_TO_CPU;
+		buf->peer.ctx = cq->peer_ctx;
+	}
+
 	mlx5_get_alloc_type(&mctx->ibv_ctx, MLX5_CQ_PREFIX, &type, default_type);
 
 	buf->numa_req.valid = 1;
 	buf->numa_req.numa_id = mlx5_cpu_local_numa();
-	ret = mlx5_alloc_prefered_buf(mctx, buf,
-				      align(nent * cqe_sz, dev->page_size),
-				      dev->page_size,
-				      type,
-				      MLX5_CQ_PREFIX);
+	ret = mlx5_alloc_preferred_buf(mctx, buf,
+				       align(nent * cqe_sz, dev->page_size),
+				       dev->page_size,
+				       type,
+				       MLX5_CQ_PREFIX);
 
 	if (ret)
 		return -1;
@@ -1329,9 +1427,41 @@ int mlx5_alloc_cq_buf(struct mlx5_context *mctx, struct mlx5_cq *cq,
 	return 0;
 }
 
-int mlx5_free_cq_buf(struct mlx5_context *ctx, struct mlx5_buf *buf)
+int mlx5_alloc_cq_peer_buf(struct mlx5_context *ctx, struct mlx5_cq *cq, int n)
 {
-	return mlx5_free_actual_buf(ctx, buf);
+	struct mlx5_device *dev = to_mdev(ctx->ibv_ctx.device);
+	int ret, i;
+
+	cq->peer_peek_table = malloc(n * sizeof(struct mlx5_peek_entry *));
+	if (!cq->peer_peek_table) {
+		errno = ENOMEM;
+		return -1;
+	}
+	memset(cq->peer_peek_table, 0, n * sizeof(struct mlx5_peek_entry *));
+
+	if (cq->peer_ctx->buf_alloc) {
+		cq->peer_buf.peer.dir = IBV_EXP_PEER_DIRECTION_FROM_PEER |
+					IBV_EXP_PEER_DIRECTION_TO_CPU;
+		cq->peer_buf.peer.ctx = cq->peer_ctx;
+	}
+
+	ret = mlx5_alloc_preferred_buf(ctx, &cq->peer_buf,
+				       n * sizeof(struct mlx5_peek_entry),
+				       dev->page_size,
+				       MLX5_ALLOC_TYPE_ALL,
+				       MLX5_CQ_PREFIX);
+	if (ret) {
+		free(cq->peer_peek_table);
+		return ret;
+	}
+
+	memset(cq->peer_buf.buf, 0, n * sizeof(struct mlx5_peek_entry));
+	cq->peer_peek_free = cq->peer_buf.buf;
+	for (i = 0; i < n - 1; i++)
+		cq->peer_peek_free[i].next = i + 1;
+	cq->peer_peek_free[n - 1].next = LAST_PEEK_ENTRY;
+
+	return 0;
 }
 
 /*

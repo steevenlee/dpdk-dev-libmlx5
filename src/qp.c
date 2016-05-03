@@ -255,6 +255,8 @@ void mlx5_init_qp_indices(struct mlx5_qp *qp)
 	qp->sq_enable.head_en_count = 0;
 	qp->rq_enable.head_en_index = 0;
 	qp->rq_enable.head_en_count = 0;
+	qp->peer_scur_post = 0;
+	qp->peer_ctrl_seg  = NULL;
 }
 
 void mlx5_init_rwq_indices(struct mlx5_rwq *rwq)
@@ -1639,9 +1641,12 @@ out:
 	if (likely(nreq)) {
 		qp->sq.head += nreq;
 
-		if (unlikely(qp->gen_data.create_flags & IBV_EXP_QP_CREATE_MANAGED_SEND)) {
-			/* Controlled qp */
+		if (unlikely(qp->gen_data.create_flags
+					& CREATE_FLAG_NO_DOORBELL)) {
+			/* Controlled or peer-direct qp */
 			wmb();
+			if (qp->peer_enabled)
+				qp->peer_ctrl_seg = seg;
 			goto post_send_no_db;
 		}
 
@@ -1653,6 +1658,83 @@ post_send_no_db:
 	mlx5_unlock(&qp->sq.lock);
 
 	return err;
+}
+
+int mlx5_exp_peer_commit_qp(struct ibv_qp *ibqp,
+			struct ibv_exp_peer_commit *commit_ctx)
+{
+	struct mlx5_qp *qp = to_mqp(ibqp);
+	struct peer_op_wr *wr = commit_ctx->storage;
+	int entries = 4;
+
+	if (!qp->peer_enabled)
+		return -EINVAL;
+
+	if (commit_ctx->entries < entries)
+		return -ENOSPC;
+
+	if (!qp->peer_ctrl_seg) {
+		/* nothing to commit */
+		commit_ctx->entries = 0;
+		return 0;
+	}
+
+	commit_ctx->rollback_id = qp->peer_scur_post |
+		((uint64_t)qp->gen_data.scur_post << 32);
+	qp->peer_scur_post = qp->gen_data.scur_post;
+
+	wr->type = IBV_EXP_PEER_OP_FENCE;
+	wr->wr.fence.fence_flags = IBV_EXP_PEER_FENCE_OP_READ |
+				   IBV_EXP_PEER_FENCE_FROM_HCA |
+				   IBV_EXP_PEER_FENCE_MEM_SYS;
+	wr = wr->next;
+
+	wr->type = IBV_EXP_PEER_OP_STORE_DWORD;
+	wr->wr.dword_va.data = htonl(qp->gen_data.scur_post & 0xffff);
+	wr->wr.dword_va.target_va = (uint32_t *)qp->gen_data.db + MLX5_SND_DBR;
+	wr = wr->next;
+
+	wr->type = IBV_EXP_PEER_OP_FENCE;
+	wr->wr.fence.fence_flags = IBV_EXP_PEER_FENCE_OP_READ |
+				   IBV_EXP_PEER_FENCE_FROM_HCA;
+	if (qp->peer_db_buf)
+		wr->wr.fence.fence_flags |= IBV_EXP_PEER_FENCE_MEM_PEER;
+	else
+		wr->wr.fence.fence_flags |= IBV_EXP_PEER_FENCE_MEM_SYS;
+	wr = wr->next;
+
+	wr->type = IBV_EXP_PEER_OP_STORE_QWORD;
+	wr->wr.qword_va.data = *(__be64 *)qp->peer_ctrl_seg;
+	wr->wr.qword_va.target_va = qp->gen_data.bf->reg
+				  + qp->gen_data.bf->offset;
+
+	qp->peer_ctrl_seg = NULL;
+	commit_ctx->entries = entries;
+
+	return 0;
+}
+
+int mlx5_exp_rollback_send(struct ibv_qp *ibqp,
+		       struct ibv_exp_rollback_ctx *rollback)
+{
+	struct mlx5_qp *qp = to_mqp(ibqp);
+	int diff;
+
+	if (rollback->flags & IBV_EXP_ROLLBACK_ABORT_UNCOMMITED) {
+		diff = (qp->gen_data.scur_post & 0xffff)
+		     - ntohl(qp->gen_data.db[MLX5_SND_DBR]);
+		if (diff < 0)
+			diff += 0x10000;
+		qp->gen_data.scur_post -= diff;
+	} else {
+		if (!(rollback->flags & IBV_EXP_ROLLBACK_ABORT_LATE)) {
+			if (qp->gen_data.scur_post !=
+			    (rollback->rollback_id >> 32))
+				return -ERANGE;
+		}
+		qp->gen_data.scur_post = rollback->rollback_id & 0xffffffff;
+	}
+	return 0;
 }
 
 int mlx5_post_send(struct ibv_qp *ibqp, struct ibv_send_wr *wr,
