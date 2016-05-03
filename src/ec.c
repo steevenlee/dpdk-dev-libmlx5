@@ -34,19 +34,19 @@
 #include "ec.h"
 #include "doorbell.h"
 
-static struct mlx5_ec_decode *
-mlx5_get_ec_decode(struct mlx5_ec_calc *calc,
-		   uint8_t *decode_matrix,
-		   int k, int m)
+static struct mlx5_ec_mat *
+mlx5_get_ec_decode_mat(struct mlx5_ec_calc *calc,
+		       uint8_t *decode_matrix,
+		       int k, int m)
 {
-	struct mlx5_ec_decode_pool *pool = &calc->decode_pool;
-	struct mlx5_ec_decode *decode;
+	struct mlx5_ec_mat_pool *pool = &calc->mat_pool;
+	struct mlx5_ec_mat *decode;
 	uint8_t *buf;
 	int cols = MLX5_EC_NOUTPUTS(m);
 	int i, j;
 
 	mlx5_lock(&pool->lock);
-	decode = list_first_entry(&pool->list, struct mlx5_ec_decode, node);
+	decode = list_first_entry(&pool->list, struct mlx5_ec_mat, node);
 	list_del(&decode->node);
 	mlx5_unlock(&pool->lock);
 
@@ -64,40 +64,161 @@ mlx5_get_ec_decode(struct mlx5_ec_calc *calc,
 	return decode;
 }
 
-static void
-mlx5_put_ec_decode(struct mlx5_ec_calc *calc,
-		   struct mlx5_ec_decode *decode)
+static struct mlx5_ec_mat *
+mlx5_get_ec_update_mat(struct mlx5_ec_calc *calc,
+		       struct ibv_exp_ec_mem *ec_mem,
+		       uint8_t *data_updates,
+		       uint8_t *code_updates)
 {
-	struct mlx5_ec_decode_pool *pool = &calc->decode_pool;
+	struct mlx5_ec_mat_pool *pool = &calc->mat_pool;
+	struct mlx5_ec_mat *update_matrix;
+	uint8_t *update_mat;
+	uint8_t *encode_mat = calc->mat;
+	int k = ec_mem->num_data_sge;
+	int m = ec_mem->num_code_sge;
+	int cols = MLX5_EC_NOUTPUTS(m);
+	int en_cols = MLX5_EC_NOUTPUTS(calc->m);
+	int uraw, ucol, i, j;
 
 	mlx5_lock(&pool->lock);
-	list_add(&decode->node, &pool->list);
+	if (list_empty(&pool->list)) {
+		fprintf(stderr, "pool of matrices is empty\n");
+		mlx5_unlock(&pool->lock);
+		return NULL;
+	}
+
+	update_matrix = list_first_entry(&pool->list, struct mlx5_ec_mat, node);
+	list_del_init(&update_matrix->node);
+	mlx5_unlock(&pool->lock);
+	update_mat = (uint8_t *)(uintptr_t)update_matrix->sge.addr;
+
+	/* We first constract identity matrix */
+	for (uraw = 0; uraw < m; uraw++) {
+		for (ucol = 0; ucol < m; ucol++) {
+			if (uraw == ucol)
+			 /* Crazy HW formatting, bit 5 is on */
+				update_mat[uraw * cols + ucol] = 1 | 0x10;
+			 else
+			 /* Crazy HW formatting, bit 5 is on */
+				update_mat[uraw * cols + ucol] = 0 | 0x10;
+		}
+	}
+
+	ucol = 0;
+	/* Now we copy appropriate entries from encode matrix */
+	for (i = 0; i < calc->k; i++) {
+		if (data_updates[i]) {
+			for (j = 0; j < calc->m; j++) {
+				if (code_updates[j]) {
+				/*
+				* We update block number i
+				* and we want to compute code block number j.
+				* So we copy entry from encode_matrix[i][j]
+				* to update matrix[uraw][ucal] and
+				* to update_matrix[uraw+1][ucal].
+				* Note that in update matrix raw 2*i+1
+				* duplicates raw i
+				*/
+					update_mat[uraw * cols + ucol] =
+						encode_mat[i * en_cols + j];
+					update_mat[(uraw + 1) * cols + ucol] =
+						encode_mat[i * en_cols + j];
+
+					/*
+					 * We filled raw entry ucol,
+					 * and increase the counter
+					 */
+					ucol++;
+				}
+			}
+			/*
+			 * We copied required entries for data update i
+			 * to update matrix raws uraw and uraw+1.
+			 * Now we increase the uraw counter and
+			 * zero cols counter for next iteration.
+			 */
+			ucol = 0;
+			uraw = uraw + 2;
+		}
+	}
+
+	/* Three outputs, zero the last column */
+	if (m == 3)
+		for (uraw = 0; uraw < k; uraw++)
+			update_mat[uraw * cols + 3] = 0x0;
+
+	return update_matrix;
+}
+
+static void
+mlx5_put_ec_mat(struct mlx5_ec_calc *calc,
+		struct mlx5_ec_mat *mat)
+{
+	struct mlx5_ec_mat_pool *pool = &calc->mat_pool;
+
+	mlx5_lock(&pool->lock);
+	list_add(&mat->node, &pool->list);
+	mlx5_unlock(&pool->lock);
+}
+
+static struct mlx5_ec_comp *
+mlx5_get_ec_comp(struct mlx5_ec_calc *calc,
+		 struct mlx5_ec_mat *ec_mat,
+		 struct ibv_exp_ec_comp *ec_comp)
+{
+	struct mlx5_ec_comp_pool *pool = &calc->comp_pool;
+	struct mlx5_ec_comp *comp;
+
+	mlx5_lock(&pool->lock);
+	if (list_empty(&pool->list)) {
+		fprintf(stderr, "pool of comps is empty\n");
+		mlx5_unlock(&pool->lock);
+		return NULL;
+	}
+	comp = list_first_entry(&pool->list, struct mlx5_ec_comp, node);
+	list_del_init(&comp->node);
+	mlx5_unlock(&pool->lock);
+
+	comp->ec_mat = ec_mat;
+	comp->comp = ec_comp;
+
+	return comp;
+}
+
+static void
+mlx5_put_ec_comp(struct mlx5_ec_calc *calc,
+		 struct mlx5_ec_comp *comp)
+{
+	struct mlx5_ec_comp_pool *pool = &calc->comp_pool;
+
+	comp->comp = NULL;
+	comp->ec_mat = NULL;
+	mlx5_lock(&pool->lock);
+	list_add(&comp->node, &pool->list);
 	mlx5_unlock(&pool->lock);
 }
 
 static void handle_ec_comp(struct mlx5_ec_calc *calc, struct ibv_wc *wc)
 {
+	struct mlx5_ec_comp *comp;
 	struct ibv_exp_ec_comp *ec_comp;
 
-	if (wc->opcode == IBV_WC_SEND) {
-		struct mlx5_ec_decode *decode =
-			(struct mlx5_ec_decode *)(uintptr_t)wc->wr_id;
-		if (decode)
-			mlx5_put_ec_decode(calc, decode);
+	if (unlikely(wc->opcode == IBV_WC_SEND)) {
+		fprintf(stderr, "calc %p got IBV_WC_SEND completion\n", calc);
 		return;
 	}
 
-	ec_comp = (struct ibv_exp_ec_comp *)(uintptr_t)wc->wr_id;
-	if (ec_comp == NULL) {
-		/* Caller didn't want a comp notification */
-		return;
-	}
+	comp = (struct mlx5_ec_comp *)(uintptr_t)wc->wr_id;
+	if (comp->ec_mat)
+		mlx5_put_ec_mat(calc, comp->ec_mat);
 
+	ec_comp = comp->comp;
 	if (likely(wc->status == IBV_WC_SUCCESS))
 		ec_comp->status = IBV_EXP_EC_CALC_SUCCESS;
 	else
 		ec_comp->status = IBV_EXP_EC_CALC_FAIL;
 
+	mlx5_put_ec_comp(calc, comp);
 	ec_comp->done(ec_comp);
 }
 
@@ -335,18 +456,44 @@ free_mat:
 	return err;
 }
 
-static void free_decodes(struct mlx5_ec_calc *calc)
+static void free_comps(struct mlx5_ec_calc *calc)
 {
-	struct mlx5_ec_decode_pool *pool = &calc->decode_pool;
-
-	free(pool->decodes);
-	ibv_dereg_mr(pool->decode_mr);
-	free(pool->decode_buf);
+	free(calc->comp_pool.comps);
 }
 
-static int alloc_decodes(struct mlx5_ec_calc *calc)
+static int alloc_comps(struct mlx5_ec_calc *calc)
 {
-	struct mlx5_ec_decode_pool *pool = &calc->decode_pool;
+	struct mlx5_ec_comp_pool *pool = &calc->comp_pool;
+	int comp_num = calc->max_inflight_calcs;
+	int i;
+
+	INIT_LIST_HEAD(&pool->list);
+	mlx5_lock_init(&pool->lock, 1, mlx5_get_locktype());
+
+	pool->comps = calloc(comp_num, sizeof(*pool->comps));
+	if (!pool->comps) {
+		fprintf(stderr, "failed to allocate comps\n");
+		return -ENOMEM;
+	}
+
+	for (i = 0; i < comp_num; i++)
+		list_add_tail(&pool->comps[i].node, &pool->list);
+
+	return 0;
+}
+
+static void free_matrices(struct mlx5_ec_calc *calc)
+{
+	struct mlx5_ec_mat_pool *pool = &calc->mat_pool;
+
+	free(pool->matrices);
+	ibv_dereg_mr(pool->mat_mr);
+	free(pool->mat_buf);
+}
+
+static int alloc_matrices(struct mlx5_ec_calc *calc)
+{
+	struct mlx5_ec_mat_pool *pool = &calc->mat_pool;
 	int mat_num = calc->max_inflight_calcs;
 	int mat_size;
 	int cols;
@@ -358,45 +505,51 @@ static int alloc_decodes(struct mlx5_ec_calc *calc)
 	INIT_LIST_HEAD(&pool->list);
 	mlx5_lock_init(&pool->lock, 1, mlx5_get_locktype());
 
-	pool->decode_buf = calloc(mat_num, mat_size);
-	if (!pool->decode_buf) {
-		fprintf(stderr, "failed to allocate decode buffer\n");
+	pool->mat_buf = calloc(mat_num, mat_size);
+	if (!pool->mat_buf) {
+		fprintf(stderr, "failed to allocate matrix buffer\n");
 		return ENOMEM;
 	}
 
-	pool->decode_mr = ibv_reg_mr(calc->pd, pool->decode_buf,
-				     mat_size * mat_num,
-				     IBV_ACCESS_LOCAL_WRITE);
-	if (!pool->decode_mr) {
+	pool->mat_mr = ibv_reg_mr(calc->pd, pool->mat_buf,
+				  mat_size * mat_num,
+				  IBV_ACCESS_LOCAL_WRITE);
+	if (!pool->mat_mr) {
 		fprintf(stderr, "failed to alloc calc decode matrix mr\n");
 		err = errno;
-		goto err_decode_buf;
+		goto err_mat_buf;
 	}
 
-	pool->decodes = calloc(mat_num, sizeof(*pool->decodes));
-	if (!pool->decodes) {
-		fprintf(stderr, "failed to allocate decode bufs\n");
+	pool->matrices = calloc(mat_num, sizeof(*pool->matrices));
+	if (!pool->matrices) {
+		fprintf(stderr, "failed to allocate matrix bufs\n");
 		err = ENOMEM;
-		goto err_decode_mr;
+		goto err_mat_mr;
 	}
 
 	for (i = 0; i < mat_num; i++) {
-		struct mlx5_ec_decode *decode = &pool->decodes[i];
+		struct mlx5_ec_mat *mat = &pool->matrices[i];
 
-		decode->sge.lkey = pool->decode_mr->lkey;
-		decode->sge.length = mat_size;
-		decode->sge.addr = (uintptr_t)(pool->decode_buf + i * mat_size);
-		list_add_tail(&decode->node, &pool->list);
+		mat->sge.lkey = pool->mat_mr->lkey;
+		mat->sge.length = mat_size;
+		mat->sge.addr = (uintptr_t)(pool->mat_buf + i * mat_size);
+		list_add_tail(&mat->node, &pool->list);
 	}
 
 	return 0;
 
-err_decode_mr:
-	ibv_dereg_mr(pool->decode_mr);
-err_decode_buf:
-	free(pool->decode_buf);
+err_mat_mr:
+	ibv_dereg_mr(pool->mat_mr);
+err_mat_buf:
+	free(pool->mat_buf);
 
 	return err;
+}
+
+static void free_dump(struct mlx5_ec_calc *calc)
+{
+	ibv_dereg_mr(calc->dump_mr);
+	free(calc->dump);
 }
 
 static int alloc_dump(struct mlx5_ec_calc *calc)
@@ -537,18 +690,24 @@ mlx5_alloc_ec_calc(struct ibv_pd *pd,
 	if (!calc->qp)
 		goto encode_matrix;
 
-	err = alloc_decodes(calc);
+	err = alloc_matrices(calc);
 	if (err)
 		goto calc_qp;
 
 	err = alloc_dump(calc);
 	if (err)
-		goto calc_decodes;
+		goto free_mat;
+
+	err = alloc_comps(calc);
+	if (err)
+		goto free_dump;
 
 	return ibcalc;
 
-calc_decodes:
-	free_decodes(calc);
+free_dump:
+	free_dump(calc);
+free_mat:
+	free_matrices(calc);
 calc_qp:
 	ibv_destroy_qp(calc->qp);
 encode_matrix:
@@ -578,7 +737,9 @@ mlx5_dealloc_ec_calc(struct ibv_exp_ec_calc *ec_calc)
 	struct mlx5_ec_calc *calc = to_mcalc(ec_calc);
 	void *status;
 
-	free_decodes(calc);
+	free_comps(calc);
+	free_dump(calc);
+	free_matrices(calc);
 	ibv_destroy_qp(calc->qp);
 	dereg_encode_matrix(calc);
 	mlx5_dereg_mr(calc->inumr);
@@ -819,7 +980,7 @@ post_ec_vec_calc(struct mlx5_ec_calc *calc,
 
 static int ec_post_recv(struct ibv_qp *qp,
 			struct ibv_sge *sge,
-			struct ibv_exp_ec_comp *comp)
+			struct mlx5_ec_comp *comp)
 {
 	struct ibv_recv_wr wr, *bad_wr;
 	int err;
@@ -863,21 +1024,15 @@ static int mlx5_set_encode_code(struct mlx5_ec_calc *calc,
 				struct ibv_sge **out_ptr)
 {
 	int i;
-
-	/* Sanity check the code sges */
-	if (unlikely(ec_mem->num_code_sge != calc->m)) {
-		fprintf(stderr, "Unsupported num_code_sge %d != %d\n",
-			ec_mem->num_code_sge, calc->m);
-		return EINVAL;
-	}
+	int m = ec_mem->num_code_sge;
 
 	/* Single output, just point to it */
-	if (calc->m == 1) {
+	if (m == 1) {
 		*out_ptr = ec_mem->code_blocks;
 		goto out;
 	}
 
-	for (i = 0; i < calc->m; i++) {
+	for (i = 0; i < m; i++) {
 		klms[i].addr = ec_mem->code_blocks[i].addr;
 		klms[i].lkey = ec_mem->code_blocks[i].lkey;
 		klms[i].length = ec_mem->code_blocks[i].length;
@@ -889,14 +1044,14 @@ static int mlx5_set_encode_code(struct mlx5_ec_calc *calc,
 	}
 
 	/* Take care of 3 outputs dumping */
-	if (calc->m == 3) {
+	if (m == 3) {
 		klms[3].addr = (uintptr_t)calc->dump;
 		klms[3].lkey = calc->dump_mr->lkey;
 		klms[3].length = ec_mem->block_size;
 	}
 
 	out->addr = klms[0].addr;
-	out->length = ec_mem->block_size * MLX5_EC_NOUTPUTS(calc->m);
+	out->length = ec_mem->block_size * MLX5_EC_NOUTPUTS(m);
 	out->lkey = calc->outumr->lkey;
 	*out_ptr = out;
 out:
@@ -909,17 +1064,11 @@ static int mlx5_set_encode_data(struct mlx5_ec_calc *calc,
 				int *contig)
 {
 	uint32_t lkey = ec_mem->data_blocks[0].lkey;
+	int k = ec_mem->num_data_sge;
 	int i;
 
-	/* Sanity check the data sges */
-	if (unlikely(ec_mem->num_data_sge != calc->k)) {
-		fprintf(stderr, "Unsupported num_data_sge %d != %d\n",
-			ec_mem->num_data_sge, calc->k);
-		return EINVAL;
-	}
-
 	*contig = 1;
-	for (i = 0; i < calc->k; i++) {
+	for (i = 0; i < k; i++) {
 		if (ec_mem->data_blocks[i].length != ec_mem->block_size) {
 			fprintf(stderr, "Unsupported data_block[%d] length %d\n",
 				i, ec_mem->data_blocks[i].length);
@@ -937,17 +1086,21 @@ static int mlx5_set_encode_data(struct mlx5_ec_calc *calc,
 	}
 
 	in->addr = ec_mem->data_blocks[0].addr;
-	in->length = ec_mem->block_size * calc->k;
+	in->length = ec_mem->block_size * k;
 	in->lkey = lkey;
 
 	return 0;
 }
 
 static int __mlx5_ec_encode_async(struct mlx5_ec_calc *calc,
-			 struct ibv_exp_ec_mem *ec_mem,
-			 struct ibv_exp_ec_comp *ec_comp)
+				  int k, int m,
+				  uint8_t *mat, uint32_t mat_lkey,
+				  struct ibv_exp_ec_mem *ec_mem,
+				  struct ibv_exp_ec_comp *ec_comp,
+				  struct mlx5_ec_mat *ec_mat)
 {
 	struct mlx5_qp *qp = to_mqp(calc->qp);
+	struct mlx5_ec_comp *comp;
 	struct ibv_sge klms[4];
 	struct ibv_sge in, out, *out_ptr = NULL;
 	void *uninitialized_var(seg);
@@ -962,15 +1115,22 @@ static int __mlx5_ec_encode_async(struct mlx5_ec_calc *calc,
 	if (unlikely(err))
 		goto error;
 
-	/* post recv for calc SEND */
-	err = ec_post_recv((struct ibv_qp *)&qp->verbs_qp, out_ptr, ec_comp);
-	if (unlikely(err))
+	comp = mlx5_get_ec_comp(calc, ec_mat, ec_comp);
+	if (unlikely(!comp)) {
+		fprintf(stderr, "Failed to get comp from pool\n");
+		err = -EINVAL;
 		goto error;
+	}
 
-	if (calc->m > 1) {
+	/* post recv for calc SEND */
+	err = ec_post_recv((struct ibv_qp *)&qp->verbs_qp, out_ptr, comp);
+	if (unlikely(err))
+		goto comp_error;
+
+	if (m > 1) {
 		/* post pattern KLM - non-signaled */
 		idx = begin_wqe(qp, &seg);
-		post_ec_umr(calc, klms, calc->m, ec_mem->block_size,
+		post_ec_umr(calc, klms, m, ec_mem->block_size,
 			    1, calc->outumr->lkey, &seg, &size);
 		finish_wqe(qp, idx, size, NULL);
 		wqe_count++;
@@ -979,7 +1139,7 @@ static int __mlx5_ec_encode_async(struct mlx5_ec_calc *calc,
 	if (!contig) {
 		/* post UMR of input - non-signaled */
 		idx = begin_wqe(qp, &seg);
-		post_ec_umr(calc, ec_mem->data_blocks, calc->k,
+		post_ec_umr(calc, ec_mem->data_blocks, k,
 			    ec_mem->block_size, 0, calc->inumr->lkey,
 			    &seg, &size);
 		finish_wqe(qp, idx, size, NULL);
@@ -989,8 +1149,8 @@ static int __mlx5_ec_encode_async(struct mlx5_ec_calc *calc,
 	/* post vec_calc SEND - non-signaled */
 	idx = begin_wqe(qp, &seg);
 	post_ec_vec_calc(calc, &in, ec_mem->block_size,
-			 calc->k, calc->m, calc->mat,
-			 calc->mat_mr->lkey,
+			 k, m, mat,
+			 mat_lkey,
 			 0, seg, &size);
 	finish_wqe(qp, idx, size, NULL);
 	wqe_count++;
@@ -1005,10 +1165,33 @@ static int __mlx5_ec_encode_async(struct mlx5_ec_calc *calc,
 
 	return 0;
 
+comp_error:
+	mlx5_put_ec_comp(calc, comp);
 error:
 	errno = err;
 
 	return err;
+}
+
+/*
+*  Check that matrix and vectors dimensions are consistent
+ */
+static int check_sge(struct mlx5_ec_calc *calc,
+		      struct ibv_exp_ec_mem *ec_mem)
+{
+	if (unlikely(ec_mem->num_data_sge != calc->k)) {
+		fprintf(stderr, "Unsupported num_data_sge %d != %d\n",
+			ec_mem->num_data_sge, calc->k);
+		return -EINVAL;
+	}
+
+	if (unlikely(ec_mem->num_code_sge != calc->m)) {
+		fprintf(stderr, "Unsupported num_code_sge %d != %d\n",
+			ec_mem->num_code_sge, calc->m);
+		return -EINVAL;
+	}
+
+	return 0;
 }
 
 int mlx5_ec_encode_async(struct ibv_exp_ec_calc *ec_calc,
@@ -1019,8 +1202,82 @@ int mlx5_ec_encode_async(struct ibv_exp_ec_calc *ec_calc,
 	struct mlx5_qp *qp = to_mqp(calc->qp);
 	int ret;
 
+	ret = check_sge(calc, ec_mem);
+	if (ret < 0)
+		return ret;
+
 	mlx5_lock(&qp->sq.lock);
-	ret = __mlx5_ec_encode_async(calc, ec_mem, ec_comp);
+	ret = __mlx5_ec_encode_async(calc, calc->k, calc->m, calc->mat,
+				     calc->mat_mr->lkey, ec_mem, ec_comp,
+				     NULL);
+	mlx5_unlock(&qp->sq.lock);
+
+	return ret;
+}
+
+/*
+ * Fail if update matrix is of bigger dimension then encode matrix
+ */
+static int check_update_params(int k, int m, uint8_t *data_updates)
+{
+	int i, raws, num_updates = 0;
+
+	for (i = 0; i < k; i++)
+		if (data_updates[i])
+			++num_updates;
+
+	raws = m + 2 * num_updates;
+	if (raws >= k)
+		return 0;
+	return 1;
+}
+
+static int __mlx5_ec_update_async(struct mlx5_ec_calc *calc,
+				  struct ibv_exp_ec_mem *ec_mem,
+				  uint8_t *data_updates,
+				  uint8_t *code_updates,
+				  struct ibv_exp_ec_comp *ec_comp)
+{
+	int ret;
+	struct mlx5_ec_mat *update_mat;
+
+	/* Check that update is worth an effort */
+	if (!check_update_params(calc->k, calc->m, data_updates)) {
+		fprintf(stderr, "Update not supported: encode preferred\n");
+		return -EINVAL;
+	}
+
+	/* Get update matrix */
+	update_mat = mlx5_get_ec_update_mat(calc, ec_mem,
+					    data_updates, code_updates);
+	if (!update_mat) {
+		fprintf(stderr, "Failed to get matrix from pool\n");
+		return -EINVAL;
+	}
+
+	/* Get new code */
+	ret = __mlx5_ec_encode_async(calc, ec_mem->num_data_sge,
+				     ec_mem->num_code_sge,
+				     (uint8_t *)(uintptr_t)update_mat->sge.addr,
+				     update_mat->sge.lkey,
+				     ec_mem, ec_comp, update_mat);
+
+	return ret;
+}
+
+int mlx5_ec_update_async(struct ibv_exp_ec_calc *ec_calc,
+			 struct ibv_exp_ec_mem *ec_mem,
+			 uint8_t *data_updates,
+			 uint8_t *code_updates,
+			 struct ibv_exp_ec_comp *ec_comp)
+{
+	struct mlx5_ec_calc *calc = to_mcalc(ec_calc);
+	struct mlx5_qp *qp = to_mqp(calc->qp);
+	int ret;
+
+	mlx5_lock(&qp->sq.lock);
+	ret = __mlx5_ec_update_async(calc, ec_mem, data_updates,
+				     code_updates, ec_comp);
 	mlx5_unlock(&qp->sq.lock);
 
 	return ret;
@@ -1028,7 +1285,7 @@ int mlx5_ec_encode_async(struct ibv_exp_ec_calc *ec_calc,
 
 static int set_decode_klms(struct mlx5_ec_calc *calc,
 			   struct ibv_exp_ec_mem *ec_mem,
-			   uint32_t erasures,
+			   uint8_t *erasures,
 			   struct ibv_sge *in,
 			   struct ibv_sge *iklms,
 			   int *in_num,
@@ -1044,7 +1301,7 @@ static int set_decode_klms(struct mlx5_ec_calc *calc,
 	iklms[0].addr = 0;
 
 	for (i = 0; i < calc->k + calc->m; i++) {
-		if (erasures & (1 << i)) {
+		if (erasures[i]) {
 			oklms[m].length = ec_mem->block_size;
 			if (i < calc->k) {
 				if (data[i].length != ec_mem->block_size) {
@@ -1057,7 +1314,8 @@ static int set_decode_klms(struct mlx5_ec_calc *calc,
 			} else if (i < calc->k + calc->m) {
 				if (code[i - calc->k].length != ec_mem->block_size) {
 					fprintf(stderr, "Unsupported code_block[%d] length %d\n",
-						i, code[i - calc->k].length);
+						i - calc->k,
+						code[i - calc->k].length);
 					return EINVAL;
 				}
 				oklms[m].lkey = code[i - calc->k].lkey;
@@ -1117,12 +1375,13 @@ static int set_decode_klms(struct mlx5_ec_calc *calc,
 
 static int __mlx5_ec_decode_async(struct mlx5_ec_calc *calc,
 			 struct ibv_exp_ec_mem *ec_mem,
-			 uint32_t erasures,
+			 uint8_t *erasures,
 			 uint8_t *decode_matrix,
 			 struct ibv_exp_ec_comp *ec_comp)
 {
 	struct mlx5_qp *qp = to_mqp(calc->qp);
-	struct mlx5_ec_decode *decode;
+	struct mlx5_ec_mat *decode;
+	struct mlx5_ec_comp *comp;
 	struct ibv_sge in_klms[16]; /* XXX: relief the stack? */
 	struct ibv_sge out_klms[4];
 	struct ibv_sge out, in;
@@ -1136,12 +1395,19 @@ static int __mlx5_ec_decode_async(struct mlx5_ec_calc *calc,
 	if (unlikely(err) || unlikely(m == 0))
 		goto error;
 
-	/* post recv for calc SEND */
-	err = ec_post_recv(calc->qp, &out, ec_comp);
-	if (unlikely(err))
-		goto error;
+	decode = mlx5_get_ec_decode_mat(calc, decode_matrix, k, m);
 
-	decode = mlx5_get_ec_decode(calc, decode_matrix, k, m);
+	comp = mlx5_get_ec_comp(calc, decode, ec_comp);
+	if (unlikely(!comp)) {
+		fprintf(stderr, "Failed to get comp from pool\n");
+		err = -EINVAL;
+		goto mat_error;
+	}
+
+	/* post recv for calc SEND */
+	err = ec_post_recv(calc->qp, &out, comp);
+	if (unlikely(err))
+		goto comp_error;
 
 	if (m > 1) {
 		/* post pattern KLM of output - non-signaled */
@@ -1159,12 +1425,12 @@ static int __mlx5_ec_decode_async(struct mlx5_ec_calc *calc,
 	finish_wqe(qp, idx, size, NULL);
 	wqe_count++;
 
-	/* post vec_calc SEND - signaled */
+	/* post vec_calc SEND - non-signaled */
 	idx = begin_wqe(qp, &seg);
 	post_ec_vec_calc(calc, &in, ec_mem->block_size, k, m,
 			 (void *)(uintptr_t)decode->sge.addr, decode->sge.lkey,
-			 1, seg, &size);
-	finish_wqe(qp, idx, size, decode);
+			 0, seg, &size);
+	finish_wqe(qp, idx, size, NULL);
 	wqe_count++;
 
 	/* ring the DB */
@@ -1177,6 +1443,10 @@ static int __mlx5_ec_decode_async(struct mlx5_ec_calc *calc,
 
 	return 0;
 
+comp_error:
+	mlx5_put_ec_comp(calc, comp);
+mat_error:
+	mlx5_put_ec_mat(calc, decode);
 error:
 	errno = err;
 
@@ -1185,7 +1455,7 @@ error:
 
 int mlx5_ec_decode_async(struct ibv_exp_ec_calc *ec_calc,
 			 struct ibv_exp_ec_mem *ec_mem,
-			 uint32_t erasures,
+			 uint8_t *erasures,
 			 uint8_t *decode_matrix,
 			 struct ibv_exp_ec_comp *ec_comp)
 {
@@ -1204,7 +1474,7 @@ int mlx5_ec_decode_async(struct ibv_exp_ec_calc *ec_calc,
 static void
 mlx5_sync_done(struct ibv_exp_ec_comp *comp)
 {
-	struct mlx5_ec_comp *def_comp = to_mcomp(comp);
+	struct mlx5_ec_sync_comp *def_comp = to_mcomp(comp);
 
 	pthread_mutex_lock(&def_comp->mutex);
 	pthread_cond_signal(&def_comp->cond);
@@ -1215,7 +1485,7 @@ int mlx5_ec_encode_sync(struct ibv_exp_ec_calc *ec_calc,
 			struct ibv_exp_ec_mem *ec_mem)
 {
 	int err;
-	struct mlx5_ec_comp def_comp = {
+	struct mlx5_ec_sync_comp def_comp = {
 		.comp = {.done = mlx5_sync_done},
 		.mutex = PTHREAD_MUTEX_INITIALIZER,
 		.cond = PTHREAD_COND_INITIALIZER,
@@ -1236,13 +1506,42 @@ int mlx5_ec_encode_sync(struct ibv_exp_ec_calc *ec_calc,
 	return (int)def_comp.comp.status;
 }
 
+int mlx5_ec_update_sync(struct ibv_exp_ec_calc *ec_calc,
+			struct ibv_exp_ec_mem *ec_mem,
+			uint8_t *data_updates,
+			uint8_t *code_updates)
+{
+	int err;
+	struct mlx5_ec_sync_comp def_comp = {
+		.comp = {.done = mlx5_sync_done},
+		.mutex = PTHREAD_MUTEX_INITIALIZER,
+		.cond = PTHREAD_COND_INITIALIZER,
+	};
+
+	pthread_mutex_lock(&def_comp.mutex);
+	err = mlx5_ec_update_async(ec_calc, ec_mem,
+				   data_updates, code_updates,
+				   &def_comp.comp);
+	if (err) {
+		fprintf(stderr, "%s: failed\n", __func__);
+		pthread_mutex_unlock(&def_comp.mutex);
+		errno = err;
+		return err;
+	}
+
+	pthread_cond_wait(&def_comp.cond, &def_comp.mutex);
+	pthread_mutex_unlock(&def_comp.mutex);
+
+	return (int)def_comp.comp.status;
+}
+
 int mlx5_ec_decode_sync(struct ibv_exp_ec_calc *ec_calc,
 			struct ibv_exp_ec_mem *ec_mem,
-			uint32_t erasures,
+			uint8_t *erasures,
 			uint8_t *decode_matrix)
 {
 	int err;
-	struct mlx5_ec_comp def_comp = {
+	struct mlx5_ec_sync_comp def_comp = {
 		.comp = {.done = mlx5_sync_done},
 		.mutex = PTHREAD_MUTEX_INITIALIZER,
 		.cond = PTHREAD_COND_INITIALIZER,
@@ -1295,7 +1594,8 @@ int mlx5_ec_encode_send(struct ibv_exp_ec_calc *ec_calc,
 
 	mlx5_lock(&qp->sq.lock);
 	/* post async encode */
-	err = __mlx5_ec_encode_async(calc, ec_mem, NULL);
+	err = __mlx5_ec_encode_async(calc, calc->k, calc->m, calc->mat,
+				     calc->mat_mr->lkey, ec_mem, NULL, NULL);
 	if (unlikely(err)) {
 		fprintf(stderr, "mlx5_ec_encode_async failed\n");
 		goto out;

@@ -40,6 +40,7 @@
 #include <infiniband/driver.h>
 #include <infiniband/driver_exp.h>
 #include <infiniband/verbs_exp.h>
+#include <infiniband/peer_ops.h>
 #include <infiniband/arch.h>
 #include "mlx5-abi.h"
 #include "list.h"
@@ -289,6 +290,7 @@ enum mlx5_alloc_type {
 	MLX5_ALLOC_TYPE_ANON,
 	MLX5_ALLOC_TYPE_HUGE,
 	MLX5_ALLOC_TYPE_CONTIG,
+	MLX5_ALLOC_TYPE_PEER_DIRECT,
 	MLX5_ALLOC_TYPE_PREFER_HUGE,
 	MLX5_ALLOC_TYPE_PREFER_CONTIG,
 	MLX5_ALLOC_TYPE_ALL
@@ -473,11 +475,20 @@ struct mlx5_numa_req {
 	int valid;
 	int numa_id;
 };
+
+struct mlx5_peer_direct_mem {
+	uint32_t dir;
+	uint64_t va_id;
+	struct ibv_exp_peer_buf *pb;
+	struct ibv_exp_peer_direct_attr *ctx;
+};
+
 struct mlx5_buf {
 	void			       *buf;
 	size_t				length;
 	int                             base;
 	struct mlx5_hugetlb_mem	       *hmem;
+	struct mlx5_peer_direct_mem     peer;
 	enum mlx5_alloc_type		type;
 	struct mlx5_numa_req		numa_req;
 	int				numa_alloc;
@@ -508,6 +519,7 @@ enum mlx5_cq_model_flags {
 enum mlx5_cq_creation_flags {
 	/* When set, CQ supports timestamping */
 	MLX5_CQ_CREATION_FLAG_COMPLETION_TIMESTAMP = 1 << 0,
+	MLX5_CQ_CREATION_FLAG_COMPRESSED_CQE	   = 1 << 1,
 };
 
 struct mlx5_mini_cqe8 {
@@ -566,6 +578,11 @@ struct mlx5_cqe64 {
 	uint8_t		op_own;
 };
 
+struct mlx5_peek_entry {
+	uint32_t busy;
+	uint32_t next;
+};
+
 struct mlx5_cq {
 	struct ibv_cq			ibv_cq;
 	uint32_t			creation_flags;
@@ -602,6 +619,12 @@ struct mlx5_cq {
 	uint8_t				compressed_mp_rq;
 	uint8_t				mini_arr_idx;
 	struct mlx5_mini_cqe8		mini_array[MLX5_MINI_ARR_SIZE];
+	/* peer-direct data */
+	int					peer_enabled;
+	struct ibv_exp_peer_direct_attr	       *peer_ctx;
+	struct mlx5_buf				peer_buf;
+	struct mlx5_peek_entry		      **peer_peek_table;
+	struct mlx5_peek_entry		       *peer_peek_free;
 };
 
 struct mlx5_srq {
@@ -686,6 +709,10 @@ enum mlx5_qp_model_flags {
 	MLX5_QP_MODEL_FLAG_THREAD_SAFE = 1 << 0,
 	MLX5_QP_MODEL_MULTI_PACKET_WQE = 1 << 1,
 	MLX5_QP_MODEL_RX_CSUM_IP_OK_IP_NON_TCP_UDP = 1 << 2,
+};
+
+enum {
+	CREATE_FLAG_NO_DOORBELL = IBV_EXP_QP_CREATE_INTERNAL_USE
 };
 
 struct mlx5_qp;
@@ -784,6 +811,13 @@ struct mlx5_qp {
 	struct mlx5_wq_recv_send_enable rq_enable;
 	struct mlx5_wq_recv_send_enable sq_enable;
 	int rx_qp;
+	/* peer-direct data */
+	int					peer_enabled;
+	struct ibv_exp_peer_direct_attr	       *peer_ctx;
+	void				       *peer_ctrl_seg;
+	uint32_t				peer_scur_post;
+	uint64_t				peer_va_ids[2];
+	struct ibv_exp_peer_buf		       *peer_db_buf;
 };
 
 struct mlx5_dct {
@@ -1030,11 +1064,11 @@ void mlx5_free_buf(struct mlx5_buf *buf);
 int mlx5_alloc_buf_contig(struct mlx5_context *mctx, struct mlx5_buf *buf,
 			  size_t size, int page_size, const char *component, void *req_addr);
 void mlx5_free_buf_contig(struct mlx5_context *mctx, struct mlx5_buf *buf);
-int mlx5_alloc_prefered_buf(struct mlx5_context *mctx,
-			    struct mlx5_buf *buf,
-			    size_t size, int page_size,
-			    enum mlx5_alloc_type alloc_type,
-			    const char *component);
+int mlx5_alloc_preferred_buf(struct mlx5_context *mctx,
+			     struct mlx5_buf *buf,
+			     size_t size, int page_size,
+			     enum mlx5_alloc_type alloc_type,
+			     const char *component);
 int mlx5_free_actual_buf(struct mlx5_context *ctx, struct mlx5_buf *buf);
 void mlx5_get_alloc_type(struct ibv_context *context,
 			 const char *component,
@@ -1073,7 +1107,7 @@ struct ibv_cq *mlx5_create_cq_ex(struct ibv_context *context,
 				 struct ibv_exp_cq_init_attr *attr);
 int mlx5_alloc_cq_buf(struct mlx5_context *mctx, struct mlx5_cq *cq,
 		      struct mlx5_buf *buf, int nent, int cqe_sz);
-int mlx5_free_cq_buf(struct mlx5_context *ctx, struct mlx5_buf *buf);
+int mlx5_alloc_cq_peer_buf(struct mlx5_context *ctx, struct mlx5_cq *cq, int n);
 int mlx5_resize_cq(struct ibv_cq *cq, int cqe);
 int mlx5_destroy_cq(struct ibv_cq *cq);
 int mlx5_poll_cq(struct ibv_cq *cq, int ne, struct ibv_wc *wc) __MLX5_ALGN_F__;
@@ -1206,6 +1240,15 @@ struct ibv_exp_wq_family *mlx5_get_wq_family(struct mlx5_rwq *rwq,
 struct ibv_exp_cq_family_v1 *mlx5_get_poll_cq_family(struct mlx5_cq *cq,
 						     struct ibv_exp_query_intf_params *params,
 						     enum ibv_exp_query_intf_status *status);
+int mlx5_exp_peer_commit_qp(struct ibv_qp *qp,
+			    struct ibv_exp_peer_commit *peer);
+int mlx5_exp_rollback_send(struct ibv_qp *ibqp,
+			   struct ibv_exp_rollback_ctx *rollback);
+int mlx5_exp_peer_peek_cq(struct ibv_cq *cq,
+			  struct ibv_exp_peer_peek *peek_ctx);
+int mlx5_exp_peer_abort_peek_cq(struct ibv_cq *ibcq,
+				struct ibv_exp_peer_abort_peek *ack_ctx);
+
 static inline void *mlx5_find_uidx(struct mlx5_context *ctx, uint32_t uidx)
 {
 	int tind = uidx >> MLX5_QP_TABLE_SHIFT;

@@ -162,7 +162,7 @@ function add_aux_funcs {
 cat <<EOF >> $output_file
 #define to_mxxx(xxx, type)\\
 	((struct mlx5_##type *)\\
-	((void *) ib##xxx - offsetof(struct mlx5_##type, ibv_##xxx)))
+	((void *) ((uintptr_t)ib##xxx - offsetof(struct mlx5_##type, ibv_##xxx))))
 
 static inline struct mlx5_qp *to_mqp(struct ibv_qp *ibqp)
 {
@@ -209,10 +209,10 @@ static inline int ibv_mlx5_exp_get_qp_info(struct ibv_qp *qp, struct	ibv_mlx5_qp
 
 	qp_info->qpn = mqp->ctrl_seg.qp_num;
 	qp_info->dbrec = mqp->gen_data.db;
-	qp_info->sq.buf = mqp->buf.buf + mqp->sq.offset;
+	qp_info->sq.buf = (void *)((uintptr_t)mqp->buf.buf + mqp->sq.offset);
 	qp_info->sq.wqe_cnt = mqp->sq.wqe_cnt;
 	qp_info->sq.stride = 1 << mqp->sq.wqe_shift;
-	qp_info->rq.buf = mqp->buf.buf + mqp->rq.offset;
+	qp_info->rq.buf = (void *)((uintptr_t)mqp->buf.buf + mqp->rq.offset);
 	qp_info->rq.wqe_cnt = mqp->rq.wqe_cnt;
 	qp_info->rq.stride = 1 << mqp->rq.wqe_shift;
 	qp_info->bf.reg = mqp->gen_data.bf->reg;
