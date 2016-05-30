@@ -267,10 +267,10 @@ void mlx5_init_rwq_indices(struct mlx5_rwq *rwq)
 	rwq->rq_enable.head_en_count = 0;
 }
 
-static int __mlx5_wq_overflow(struct mlx5_wq *wq, int nreq, struct mlx5_qp *qp) __attribute__((noinline));
-static int __mlx5_wq_overflow(struct mlx5_wq *wq, int nreq, struct mlx5_qp *qp)
+static int __mlx5_wq_overflow(int is_rq, struct mlx5_wq *wq, int nreq, struct mlx5_qp *qp) __attribute__((noinline));
+static int __mlx5_wq_overflow(int is_rq, struct mlx5_wq *wq, int nreq, struct mlx5_qp *qp)
 {
-	struct mlx5_cq *cq = to_mcq(qp->verbs_qp.qp.send_cq);
+	struct mlx5_cq *cq = to_mcq(is_rq ? qp->verbs_qp.qp.recv_cq : qp->verbs_qp.qp.send_cq);
 	unsigned cur;
 
 
@@ -280,16 +280,17 @@ static int __mlx5_wq_overflow(struct mlx5_wq *wq, int nreq, struct mlx5_qp *qp)
 
 	return cur + nreq >= wq->max_post;
 }
-static inline int mlx5_wq_overflow(struct mlx5_wq *wq, int nreq, struct mlx5_qp *qp) __attribute__((always_inline));
-static inline int mlx5_wq_overflow(struct mlx5_wq *wq, int nreq, struct mlx5_qp *qp)
+static inline int mlx5_wq_overflow(int is_rq, int nreq, struct mlx5_qp *qp) __attribute__((always_inline));
+static inline int mlx5_wq_overflow(int is_rq, int nreq, struct mlx5_qp *qp)
 {
 	unsigned cur;
+	struct mlx5_wq *wq = is_rq ? &qp->rq : &qp->sq;
 
 	cur = wq->head - wq->tail;
 	if (likely(cur + nreq < wq->max_post))
 		return 0;
 
-	return __mlx5_wq_overflow(wq, nreq, qp);
+	return __mlx5_wq_overflow(is_rq, wq, nreq, qp);
 }
 
 static inline void set_raddr_seg(struct mlx5_wqe_raddr_seg *rseg,
@@ -719,6 +720,10 @@ static void set_umr_ctrl_seg(struct ibv_exp_send_wr *wr,
 	seg->mkey_mask = htonll(umr_mask(fill));
 }
 
+enum {
+	MLX5_KLMS_IN_LIST = 4
+};
+
 static int lay_umr(struct mlx5_qp *qp, struct ibv_exp_send_wr *wr,
 		   void *seg, int *wqe_size, int *xlat_size,
 		   uint64_t *reglen)
@@ -738,6 +743,7 @@ static int lay_umr(struct mlx5_qp *qp, struct ibv_exp_send_wr *wr,
 	int inl = wr->exp_send_flags & IBV_EXP_SEND_INLINE;
 	void *buf;
 	int tmp;
+	int pad;
 
 	if (inl) {
 		if (unlikely(qp->max_inl_send_klms <
@@ -755,16 +761,31 @@ static int lay_umr(struct mlx5_qp *qp, struct ibv_exp_send_wr *wr,
 		mlist = wr->ext_op.umr.mem_list.mem_reg_list;
 		dseg = buf;
 
-		for (i = 0, j = 0; i < n; i++, j++) {
+		pad = (n % MLX5_KLMS_IN_LIST)
+		      ? n + (MLX5_KLMS_IN_LIST - (n % MLX5_KLMS_IN_LIST))
+		      : n;
+		for (i = 0, j = 0; i < pad; i++, j++) {
 			if (inl && unlikely((&dseg[j] == qend))) {
 				dseg = mlx5_get_send_wqe(qp, 0);
 				j = 0;
 			}
-
-			dseg[j].addr =  htonll((uint64_t)(uintptr_t)mlist[i].base_addr);
-			dseg[j].lkey = htonl(mlist[i].mr->lkey);
-			dseg[j].byte_count = htonl(mlist[i].length);
-			byte_count += mlist[i].length;
+			if (likely(i < n)) {
+				dseg[j].addr =  htonll((uint64_t)(uintptr_t)mlist[i].base_addr);
+				dseg[j].lkey = htonl(mlist[i].mr->lkey);
+				dseg[j].byte_count = htonl(mlist[i].length);
+				byte_count += mlist[i].length;
+			} else if (inl) {
+				/*
+				 * KLM list is aligned to 64B (16B per KLM).
+				 * According to the PRM, remaining padding must
+				 * be set to 0.
+				 */
+				dseg[j].addr = 0;
+				dseg[j].lkey = 0;
+				dseg[j].byte_count = 0;
+			} else {
+				break;
+			}
 		}
 		if (inl)
 			*wqe_size = align(n * sizeof(*dseg), 64);
@@ -1580,6 +1601,7 @@ static inline int __mlx5_post_send(struct ibv_qp *ibqp, struct ibv_exp_send_wr *
 {
 	struct mlx5_qp *qp = to_mqp(ibqp);
 	void *uninitialized_var(seg);
+	void *uninitialized_var(wqe2ring);
 	int nreq;
 	int err = 0;
 	int size;
@@ -1599,7 +1621,7 @@ static inline int __mlx5_post_send(struct ibv_qp *ibqp, struct ibv_exp_send_wr *
 		exp_send_flags = is_exp_wr ? wr->exp_send_flags : ((struct ibv_send_wr *)wr)->send_flags;
 
 		if (unlikely(!(qp->gen_data.create_flags & IBV_EXP_QP_CREATE_IGNORE_SQ_OVERFLOW) &&
-			     mlx5_wq_overflow(&qp->sq, nreq, qp))) {
+			     mlx5_wq_overflow(0, nreq, qp))) {
 			mlx5_dbg(fp, MLX5_DBG_QP_SEND, "work queue overflow\n");
 			errno = ENOMEM;
 			err = errno;
@@ -1631,6 +1653,8 @@ static inline int __mlx5_post_send(struct ibv_qp *ibqp, struct ibv_exp_send_wr *
 		qp->gen_data.wqe_head[idx] = qp->sq.head + nreq;
 		qp->gen_data.scur_post += DIV_ROUND_UP(size * 16, MLX5_SEND_WQE_BB);
 
+		wqe2ring = seg;
+
 #ifdef MLX5_DEBUG
 		if (mlx5_debug_mask & MLX5_DBG_QP_SEND)
 			dump_wqe(to_mctx(ibqp->context)->dbg_fp, idx, size, qp);
@@ -1646,11 +1670,11 @@ out:
 			/* Controlled or peer-direct qp */
 			wmb();
 			if (qp->peer_enabled)
-				qp->peer_ctrl_seg = seg;
+				qp->peer_ctrl_seg = wqe2ring;
 			goto post_send_no_db;
 		}
 
-		__ring_db(qp, qp->gen_data.bf->db_method, qp->gen_data.scur_post & 0xffff, seg, (size + 3) / 4);
+		__ring_db(qp, qp->gen_data.bf->db_method, qp->gen_data.scur_post & 0xffff, wqe2ring, (size + 3) / 4);
 	}
 
 post_send_no_db:
@@ -1783,7 +1807,7 @@ int mlx5_post_recv(struct ibv_qp *ibqp, struct ibv_recv_wr *wr,
 
 	for (nreq = 0; wr; ++nreq, wr = wr->next) {
 		if (unlikely(!(qp->gen_data.create_flags & IBV_EXP_QP_CREATE_IGNORE_RQ_OVERFLOW) &&
-		    mlx5_wq_overflow(&qp->rq, nreq, qp))) {
+		    mlx5_wq_overflow(1, nreq, qp))) {
 			errno = ENOMEM;
 			err = errno;
 			*bad_wr = wr;
