@@ -1,4 +1,4 @@
-libmlx5 (1.0.2mlnx1-OFED.3.3.0.0.9.33100) unstable; urgency=low
+libmlx5 (1.0.2mlnx1-OFED.3.3.0.0.9) unstable; urgency=low
 
   * adjust mlx5_hw.h to survive -Werror during autotools
   * Add support for compact AV
