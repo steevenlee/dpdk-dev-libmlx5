@@ -576,6 +576,13 @@ static int check_peer_direct(struct mlx5_context *ctx,
 		errno = EINVAL;
 		return -1;
 	}
+	if (attrs->comp_mask != IBV_EXP_PEER_DIRECT_VERSION ||
+	    attrs->version != 1) {
+		mlx5_dbg(fp, dbg_mask, "peer direct version mismatch\n");
+		errno = EINVAL;
+		return -1;
+	}
+
 	if (!attrs->unregister_va != !attrs->register_va) {
 		mlx5_dbg(fp, dbg_mask, "inconsistent peer direct register hooks\n");
 		mlx5_dbg(fp, dbg_mask, "register_va:%p unregister_va:%p\n",
@@ -700,8 +707,10 @@ static struct ibv_cq *create_cq(struct ibv_context *context,
 		if (check_peer_direct(mctx, attr->peer_direct_attrs,
 				      MLX5_DBG_CQ,
 				      IBV_EXP_PEER_OP_STORE_DWORD_CAP |
-				      IBV_EXP_PEER_OP_POLL_AND_DWORD_CAP |
-				      IBV_EXP_PEER_OP_POLL_NOR_DWORD_CAP)) {
+				      IBV_EXP_PEER_OP_POLL_AND_DWORD_CAP) &&
+		    attr->peer_direct_attrs->caps &
+				     (IBV_EXP_PEER_OP_POLL_NOR_DWORD_CAP |
+				      IBV_EXP_PEER_OP_POLL_GEQ_DWORD_CAP)) {
 			goto err_spl;
 		}
 		cq->peer_enabled = 1;
@@ -1228,6 +1237,11 @@ static int mlx5_calc_send_wqe(struct mlx5_context *ctx,
 				 attr->cap.max_inline_data, 16);
 	}
 
+	if (attr->comp_mask & IBV_EXP_QP_INIT_ATTR_MAX_TSO_HEADER) {
+		overhead += align(attr->max_tso_header, 16);
+		qp->max_tso_header = attr->max_tso_header;
+	}
+
 	max_gather = (ctx->max_sq_desc_sz -  overhead) /
 		sizeof(struct mlx5_wqe_data_seg);
 	if (attr->cap.max_send_sge > max_gather)
@@ -1708,6 +1722,8 @@ static void update_caps(struct ibv_context *context)
 	if (attr.comp_mask & IBV_EXP_DEVICE_ATTR_EXT_ATOMIC_ARGS)
 		ctx->info.bit_mask_log_atomic_arg_sizes |=
 			attr.ext_atom.log_atomic_arg_sizes;
+	if (attr.comp_mask & IBV_EXP_DEVICE_ATTR_TSO_CAPS)
+		ctx->max_tso = attr.tso_caps.max_tso;
 
 	return;
 }
@@ -1832,6 +1848,12 @@ static struct ibv_qp *create_qp(struct ibv_context *context,
 	    (attrx->exp_create_flags & IBV_EXP_QP_CREATE_UMR))
 		qp->umr_en = 1;
 
+	if ((attrx->comp_mask & IBV_EXP_QP_INIT_ATTR_MAX_TSO_HEADER) &&
+	    (attrx->qp_type != IBV_QPT_RAW_PACKET)) {
+		errno = EINVAL;
+		goto err;
+	}
+
 	if (attrx->cap.max_send_sge > ctx->max_sge) {
 		errno = EINVAL;
 		goto err;
@@ -1928,6 +1950,7 @@ static struct ibv_qp *create_qp(struct ibv_context *context,
 		attr.peer_id = qp->peer_ctx->peer_id;
 		attr.dir = IBV_EXP_PEER_DIRECTION_FROM_PEER |
 			   IBV_EXP_PEER_DIRECTION_TO_HCA;
+		attr.alignment = max(ctx->cache_line_size, MLX5_SEND_WQE_BB);
 		qp->peer_db_buf = qp->peer_ctx->buf_alloc(&attr);
 		if (qp->peer_db_buf)
 			qp->gen_data.db = qp->peer_db_buf->addr;
@@ -1960,11 +1983,12 @@ static struct ibv_qp *create_qp(struct ibv_context *context,
 	drv->rq_wqe_shift = qp->rq.wqe_shift;
 
 	if (qp->peer_enabled && qp->peer_ctx->register_va) {
-		qp->peer_va_ids[0] =
+		qp->peer_va_ids[MLX5_QP_PEER_VA_ID_DBR] =
 			qp->peer_ctx->register_va((uint32_t *)qp->gen_data.db,
 						  ctx->cache_line_size,
-						  qp->peer_ctx->peer_id);
-		if (!qp->peer_va_ids[0]) {
+						  qp->peer_ctx->peer_id,
+						  qp->peer_db_buf);
+		if (!qp->peer_va_ids[MLX5_QP_PEER_VA_ID_DBR]) {
 			mlx5_dbg(fp, MLX5_DBG_QP, "\n");
 			goto err_rq_db;
 		}
@@ -2017,12 +2041,13 @@ static struct ibv_qp *create_qp(struct ibv_context *context,
 	qp->gen_data_warm.pattern = MLX5_QP_PATTERN;
 
 	if (qp->peer_enabled && qp->peer_ctx->register_va) {
-		qp->peer_va_ids[1] =
+		qp->peer_va_ids[MLX5_QP_PEER_VA_ID_BF] =
 			qp->peer_ctx->register_va(qp->gen_data.bf->reg +
 						  qp->gen_data.bf->offset,
 						  qp->gen_data.bf->buf_size,
-						  qp->peer_ctx->peer_id);
-		if (!qp->peer_va_ids[1]) {
+						  qp->peer_ctx->peer_id,
+						  IBV_EXP_PEER_IOMEMORY);
+		if (!qp->peer_va_ids[MLX5_QP_PEER_VA_ID_BF]) {
 			mlx5_dbg(fp, MLX5_DBG_QP, "\n");
 			goto err_destroy;
 		}
@@ -2732,15 +2757,15 @@ struct ibv_ah *mlx5_create_ah_common(struct ibv_pd *pd,
 	}
 	wqe = &ah->av;
 
-	wqe->base.stat_rate_sl = (attr->static_rate << 4) | attr->sl;
-
 	if (link_layer == IBV_LINK_LAYER_ETHERNET) {
 		if (gid_type == IBV_EXP_ROCE_V2_GID_TYPE)
 			wqe->base.rlid = htons(ctx->rroce_udp_sport_min);
 		grh = 0;
+		wqe->base.stat_rate_sl = (attr->static_rate << 4) | ((attr->sl & 0x7) << 1);
 	} else {
 		wqe->base.fl_mlid = attr->src_path_bits & 0x7f;
 		wqe->base.rlid = htons(attr->dlid);
+		wqe->base.stat_rate_sl = (attr->static_rate << 4) | attr->sl;
 		grh = 1;
 	}
 

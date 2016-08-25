@@ -270,6 +270,9 @@ static void handle_good_req(struct ibv_wc *wc, struct mlx5_cqe64 *cqe)
 	case MLX5_OPCODE_ATOMIC_MASKED_FA:
 		wc->opcode    = IBV_EXP_WC_MASKED_FETCH_ADD;
 		break;
+	case MLX5_OPCODE_TSO:
+		wc->opcode    = IBV_EXP_WC_TSO;
+		break;
 	}
 }
 
@@ -395,6 +398,9 @@ static void mlx5_set_bad_wc_opcode(struct ibv_exp_wc *wc,
 			break;
 		case MLX5_OPCODE_ATOMIC_MASKED_FA:
 			wc->exp_opcode    = IBV_EXP_WC_MASKED_FETCH_ADD;
+			break;
+		case MLX5_OPCODE_TSO:
+			wc->exp_opcode    = IBV_EXP_WC_TSO;
 			break;
 		}
 	} else {
@@ -1031,6 +1037,12 @@ static inline int mlx5_poll_one(struct mlx5_cq *cq,
 	if (likely(offsetof(struct ibv_exp_wc, exp_wc_flags) < wc_size))
 		wc->exp_wc_flags = exp_wc_flags | (uint64_t)((struct ibv_wc *)wc)->wc_flags;
 
+	if (unlikely(cq->peer_enabled &&
+	    !(cq->peer_ctx->caps & IBV_EXP_PEER_OP_POLL_NOR_DWORD_CAP))) {
+		cqe64->op_own = MLX5_CQE_INVALID << 4;
+		wmb();
+	}
+
 	return CQ_OK;
 }
 
@@ -1048,14 +1060,28 @@ int mlx5_exp_peer_peek_cq(struct ibv_cq *ibcq,
 	if (!cq->peer_enabled)
 		return EINVAL;
 
-	if (peek_ctx->cqe_offset_from_head > cq->ibv_cq.cqe)
-		return E2BIG;
-
 	if (peek_ctx->entries < entries)
 		return ENOSPC;
 
 	mlx5_lock(&cq->lock);
-	n = cq->cons_index + peek_ctx->cqe_offset_from_head - 1;
+	switch (peek_ctx->whence) {
+	case IBV_EXP_PEER_PEEK_ABSOLUTE:
+		if (peek_ctx->offset > cq->cons_index + cq->ibv_cq.cqe) {
+			mlx5_unlock(&cq->lock);
+			return E2BIG;
+		}
+		n = peek_ctx->offset;
+	case IBV_EXP_PEER_PEEK_RELATIVE:
+		if (peek_ctx->offset > cq->ibv_cq.cqe) {
+			mlx5_unlock(&cq->lock);
+			return E2BIG;
+		}
+		n = cq->cons_index + peek_ctx->offset - 1;
+		break;
+	default:
+		mlx5_unlock(&cq->lock);
+		return EINVAL;
+	}
 	cqe = cq->active_buf->buf + (n & cq->ibv_cq.cqe) * cq->cqe_sz;
 	cur_own = n & (cq->ibv_cq.cqe + 1);
 	cqe64 = (cq->cqe_sz == 64) ? cqe : cqe + 64;
@@ -1063,11 +1089,16 @@ int mlx5_exp_peer_peek_cq(struct ibv_cq *ibcq,
 	if (cur_own) {
 		wr->type = IBV_EXP_PEER_OP_POLL_AND_DWORD;
 		wr->wr.dword_va.data = htonl(MLX5_CQE_OWNER_MASK);
-	} else {
+	} else if (cq->peer_ctx->caps & IBV_EXP_PEER_OP_POLL_NOR_DWORD_CAP) {
 		wr->type = IBV_EXP_PEER_OP_POLL_NOR_DWORD;
 		wr->wr.dword_va.data = ~htonl(MLX5_CQE_OWNER_MASK);
+	} else if (cq->peer_ctx->caps & IBV_EXP_PEER_OP_POLL_GEQ_DWORD_CAP) {
+		wr->type = IBV_EXP_PEER_OP_POLL_GEQ_DWORD;
+		wr->wr.dword_va.data = 0;
 	}
-	wr->wr.dword_va.target_va = (uint32_t *)(uintptr_t)&cqe64->wqe_counter;
+	wr->wr.dword_va.target_id = cq->active_buf->peer.va_id;
+	wr->wr.dword_va.offset = (uintptr_t)&cqe64->wqe_counter -
+				 (uintptr_t)cq->active_buf->buf;
 	wr = wr->next;
 
 	peek = cq->peer_peek_free;
@@ -1082,7 +1113,9 @@ int mlx5_exp_peer_peek_cq(struct ibv_cq *ibcq,
 
 	wr->type = IBV_EXP_PEER_OP_STORE_DWORD;
 	wr->wr.dword_va.data = 0;
-	wr->wr.dword_va.target_va = &peek->busy;
+	wr->wr.dword_va.target_id = cq->peer_buf.peer.va_id;
+	wr->wr.dword_va.offset = (uintptr_t)&peek->busy -
+				 (uintptr_t)cq->peer_buf.buf;
 
 	peek_ctx->entries = entries;
 	peek_ctx->peek_id = (uintptr_t)peek;

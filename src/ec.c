@@ -456,8 +456,27 @@ free_mat:
 	return err;
 }
 
+struct ibv_mr *reg_umr(struct ibv_pd *pd, int num_blocks)
+{
+	struct ibv_exp_create_mr_in in;
+
+	memset(&in, 0, sizeof(in));
+	in.pd = pd;
+	in.attr.create_flags = IBV_EXP_MR_INDIRECT_KLMS;
+	in.attr.exp_access_flags = IBV_EXP_ACCESS_LOCAL_WRITE;
+	in.attr.max_klm_list_size = align(num_blocks, 4);
+
+	return mlx5_create_mr(&in);
+}
+
 static void free_comps(struct mlx5_ec_calc *calc)
 {
+	int comp_num = calc->max_inflight_calcs;
+	int i;
+
+	for (i = 0; i < comp_num; i++)
+		mlx5_dereg_mr(calc->comp_pool.comps[i].outumr);
+
 	free(calc->comp_pool.comps);
 }
 
@@ -465,7 +484,7 @@ static int alloc_comps(struct mlx5_ec_calc *calc)
 {
 	struct mlx5_ec_comp_pool *pool = &calc->comp_pool;
 	int comp_num = calc->max_inflight_calcs;
-	int i;
+	int i, j;
 
 	INIT_LIST_HEAD(&pool->list);
 	mlx5_lock_init(&pool->lock, 1, mlx5_get_locktype());
@@ -476,10 +495,26 @@ static int alloc_comps(struct mlx5_ec_calc *calc)
 		return -ENOMEM;
 	}
 
-	for (i = 0; i < comp_num; i++)
+	for (i = 0; i < comp_num; i++) {
+		pool->comps[i].outumr = reg_umr(calc->pd, calc->m);
+		if (!pool->comps[i].outumr) {
+			fprintf(stderr, "calc %p failed to register outumr\n", calc);
+			goto free_umrs;
+		}
 		list_add_tail(&pool->comps[i].node, &pool->list);
+	}
 
 	return 0;
+
+free_umrs:
+	for (j = 0 ; j < i ; j++) {
+		list_del_init(&pool->comps[j].node);
+		mlx5_dereg_mr(pool->comps[j].outumr);
+	}
+	free(pool->comps);
+
+	return -ENOMEM;
+
 }
 
 static void free_matrices(struct mlx5_ec_calc *calc)
@@ -615,7 +650,6 @@ mlx5_alloc_ec_calc(struct ibv_pd *pd,
 {
 	struct mlx5_ec_calc *calc;
 	struct ibv_exp_ec_calc *ibcalc;
-	struct ibv_exp_create_mr_in in;
 	void *status;
 	int err;
 
@@ -664,22 +698,10 @@ mlx5_alloc_ec_calc(struct ibv_pd *pd,
 		goto free_cq;
 	}
 
-	memset(&in, 0, sizeof(in));
-	in.pd = calc->pd;
-	in.attr.create_flags = IBV_EXP_MR_INDIRECT_KLMS;
-	in.attr.exp_access_flags = IBV_EXP_ACCESS_LOCAL_WRITE;
-	in.attr.max_klm_list_size = align(attr->m, 4);
-	calc->outumr = mlx5_create_mr(&in);
-	if (!calc->outumr) {
-		fprintf(stderr, "failed to alloc calc out umr\n");
-		goto free_ec_poller;
-	};
-
-	in.attr.max_klm_list_size = align(attr->k, 4);
-	calc->inumr = mlx5_create_mr(&in);
+	calc->inumr = reg_umr(calc->pd, calc->k);
 	if (!calc->inumr) {
 		fprintf(stderr, "failed to alloc calc in umr\n");
-		goto free_outumr;
+		goto free_ec_poller;
 	};
 
 	err = reg_encode_matrix(calc, attr->encode_matrix);
@@ -714,8 +736,6 @@ encode_matrix:
 	dereg_encode_matrix(calc);
 free_inumr:
 	mlx5_dereg_mr(calc->inumr);
-free_outumr:
-	mlx5_dereg_mr(calc->outumr);
 free_ec_poller:
 	calc->stop_ec_poller = 1;
 	wmb();
@@ -743,7 +763,6 @@ mlx5_dealloc_ec_calc(struct ibv_exp_ec_calc *ec_calc)
 	ibv_destroy_qp(calc->qp);
 	dereg_encode_matrix(calc);
 	mlx5_dereg_mr(calc->inumr);
-	mlx5_dereg_mr(calc->outumr);
 
 	calc->stop_ec_poller = 1;
 	wmb();
@@ -1018,6 +1037,7 @@ static void finish_wqe(struct mlx5_qp *qp, int idx,
 }
 
 static int mlx5_set_encode_code(struct mlx5_ec_calc *calc,
+				struct mlx5_ec_comp *comp,
 				struct ibv_exp_ec_mem *ec_mem,
 				struct ibv_sge *klms,
 				struct ibv_sge *out,
@@ -1052,7 +1072,7 @@ static int mlx5_set_encode_code(struct mlx5_ec_calc *calc,
 
 	out->addr = klms[0].addr;
 	out->length = ec_mem->block_size * MLX5_EC_NOUTPUTS(m);
-	out->lkey = calc->outumr->lkey;
+	out->lkey = comp->outumr->lkey;
 	*out_ptr = out;
 out:
 	return 0;
@@ -1107,20 +1127,19 @@ static int __mlx5_ec_encode_async(struct mlx5_ec_calc *calc,
 	unsigned idx;
 	int size, err, contig = 0, wqe_count = 0;
 
-	err = mlx5_set_encode_code(calc, ec_mem, klms, &out, &out_ptr);
-	if (unlikely(err))
-		goto error;
-
-	err = mlx5_set_encode_data(calc, ec_mem, &in, &contig);
-	if (unlikely(err))
-		goto error;
-
 	comp = mlx5_get_ec_comp(calc, ec_mat, ec_comp);
 	if (unlikely(!comp)) {
 		fprintf(stderr, "Failed to get comp from pool\n");
 		err = -EINVAL;
 		goto error;
 	}
+	err = mlx5_set_encode_code(calc, comp, ec_mem, klms, &out, &out_ptr);
+	if (unlikely(err))
+		goto comp_error;
+
+	err = mlx5_set_encode_data(calc, ec_mem, &in, &contig);
+	if (unlikely(err))
+		goto comp_error;
 
 	/* post recv for calc SEND */
 	err = ec_post_recv((struct ibv_qp *)&qp->verbs_qp, out_ptr, comp);
@@ -1131,7 +1150,7 @@ static int __mlx5_ec_encode_async(struct mlx5_ec_calc *calc,
 		/* post pattern KLM - non-signaled */
 		idx = begin_wqe(qp, &seg);
 		post_ec_umr(calc, klms, m, ec_mem->block_size,
-			    1, calc->outumr->lkey, &seg, &size);
+			    1, comp->outumr->lkey, &seg, &size);
 		finish_wqe(qp, idx, size, NULL);
 		wqe_count++;
 	}
@@ -1284,6 +1303,7 @@ int mlx5_ec_update_async(struct ibv_exp_ec_calc *ec_calc,
 }
 
 static int set_decode_klms(struct mlx5_ec_calc *calc,
+			   struct mlx5_ec_comp *comp,
 			   struct ibv_exp_ec_mem *ec_mem,
 			   uint8_t *erasures,
 			   struct ibv_sge *in,
@@ -1363,7 +1383,7 @@ static int set_decode_klms(struct mlx5_ec_calc *calc,
 	*in_num = k;
 
 	if (m > 1)
-		out->lkey = calc->outumr->lkey;
+		out->lkey = comp->outumr->lkey;
 	else
 		out->lkey = oklms[0].lkey;
 	out->addr = oklms[0].addr;
@@ -1389,12 +1409,6 @@ static int __mlx5_ec_decode_async(struct mlx5_ec_calc *calc,
 	unsigned idx;
 	int err, size, k = 0, m = 0, wqe_count = 0;
 
-	err = set_decode_klms(calc, ec_mem, erasures,
-			      &in , in_klms, &k,
-			      &out, out_klms, &m);
-	if (unlikely(err) || unlikely(m == 0))
-		goto error;
-
 	decode = mlx5_get_ec_decode_mat(calc, decode_matrix, k, m);
 
 	comp = mlx5_get_ec_comp(calc, decode, ec_comp);
@@ -1403,6 +1417,12 @@ static int __mlx5_ec_decode_async(struct mlx5_ec_calc *calc,
 		err = -EINVAL;
 		goto mat_error;
 	}
+
+	err = set_decode_klms(calc, comp, ec_mem, erasures,
+			      &in, in_klms, &k,
+			      &out, out_klms, &m);
+	if (unlikely(err) || unlikely(m == 0))
+		goto comp_error;
 
 	/* post recv for calc SEND */
 	err = ec_post_recv(calc->qp, &out, comp);
@@ -1413,7 +1433,7 @@ static int __mlx5_ec_decode_async(struct mlx5_ec_calc *calc,
 		/* post pattern KLM of output - non-signaled */
 		idx = begin_wqe(qp, &seg);
 		post_ec_umr(calc, out_klms, m, ec_mem->block_size,
-			    1, calc->outumr->lkey, &seg, &size);
+			    1, comp->outumr->lkey, &seg, &size);
 		finish_wqe(qp, idx, size, NULL);
 		wqe_count++;
 	}
@@ -1447,7 +1467,7 @@ comp_error:
 	mlx5_put_ec_comp(calc, comp);
 mat_error:
 	mlx5_put_ec_mat(calc, decode);
-error:
+
 	errno = err;
 
 	return err;

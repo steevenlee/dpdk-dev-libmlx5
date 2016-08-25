@@ -368,6 +368,7 @@ static int alloc_preferred_buf(struct mlx5_context *mctx,
 		attr.length = size;
 		attr.peer_id = buf->peer.ctx->peer_id;
 		attr.dir = buf->peer.dir;
+		attr.alignment = page_size;
 		buf->peer.pb = buf->peer.ctx->buf_alloc(&attr);
 		if (buf->peer.pb) {
 			buf->buf = buf->peer.pb->addr;
@@ -425,7 +426,7 @@ int mlx5_alloc_preferred_buf(struct mlx5_context *mctx,
 	    (buf->peer.dir & IBV_EXP_PEER_DIRECTION_FROM_PEER ||
 	     buf->peer.dir & IBV_EXP_PEER_DIRECTION_TO_PEER)) {
 		buf->peer.va_id = buf->peer.ctx->register_va(buf->buf, size,
-				  buf->peer.ctx->peer_id);
+				  buf->peer.ctx->peer_id, buf->peer.pb);
 		if (!buf->peer.va_id) {
 			mlx5_free_actual_buf(mctx, buf);
 			return -1;

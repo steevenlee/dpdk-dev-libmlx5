@@ -85,6 +85,7 @@ enum {
 enum {
 	MLX5_ETH_INLINE_HEADER_SIZE		= 18,
 	MLX5_ETH_VLAN_INLINE_HEADER_SIZE	= 18,
+	MLX5_ETH_L2_MIN_HEADER_SIZE		= 14,
 };
 
 struct mlx5_wqe_eth_seg {
