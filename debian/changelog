@@ -1,4 +1,10 @@
-libmlx5 (1.0.2mlnx1-OFED.3.3.0.0.9) unstable; urgency=low
+libmlx5 (1.2.1mlnx1-OFED.3.4.0.0.6.34006) unstable; urgency=low
+
+  * Roll 1.2.1mlnx1-1
+
+ -- Alaa Hleihel <alaa@mellanox.com>  Tue, 09 Aug 2016 18:47:10 +0200
+
+libmlx5 (1.0.2mlnx1-1) unstable; urgency=low
 
   * adjust mlx5_hw.h to survive -Werror during autotools
   * Add support for compact AV

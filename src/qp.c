@@ -76,6 +76,7 @@ static const uint32_t mlx5_ib_opcode[] = {
 	[IBV_EXP_WR_NOP]			= MLX5_IB_OPCODE(MLX5_OPCODE_NOP,		  MLX5_OPCODE_BASIC, 0),
 	[IBV_EXP_WR_UMR_FILL]			= MLX5_IB_OPCODE(MLX5_OPCODE_UMR,		  MLX5_OPCODE_BASIC, 0),
 	[IBV_EXP_WR_UMR_INVALIDATE]             = MLX5_IB_OPCODE(MLX5_OPCODE_UMR,                 MLX5_OPCODE_BASIC, 0),
+	[IBV_EXP_WR_TSO]			= MLX5_IB_OPCODE(MLX5_OPCODE_TSO,                 MLX5_OPCODE_BASIC, 0),
 };
 
 enum {
@@ -451,19 +452,31 @@ static inline int set_data_inl_seg(struct mlx5_qp *qp, int num_sge, struct ibv_s
 
 static inline int set_data_non_inl_seg(struct mlx5_qp *qp, int num_sge, struct ibv_sge *sg_list,
 			 void *wqe, int *sz,
-			 int idx, int offset) __attribute__((always_inline));
+			 int idx, int offset, int is_tso) __attribute__((always_inline));
 static inline int set_data_non_inl_seg(struct mlx5_qp *qp, int num_sge, struct ibv_sge *sg_list,
 			 void *wqe, int *sz,
-			 int idx, int offset)
+			 int idx, int offset, int is_tso)
 {
+	struct mlx5_context *ctx = to_mctx(qp->verbs_qp.qp.context);
 	struct mlx5_wqe_data_seg *dpseg = wqe;
 	struct ibv_sge *psge;
 	int i;
 #ifdef MLX5_DEBUG
 	FILE *fp = to_mctx(qp->verbs_qp.qp.context)->dbg_fp;
 #endif
+	uint32_t max_tso = ctx->max_tso;
 
 	for (i = idx; i < num_sge; ++i) {
+		if (unlikely(is_tso)) {
+			if (unlikely(max_tso < sg_list[i].length)) {
+				mlx5_dbg(fp, MLX5_DBG_QP_SEND,
+					 "max tso payload length is %d\n",
+					 ctx->max_tso);
+				return EINVAL;
+			}
+			max_tso -= sg_list[i].length;
+		}
+
 		if (unlikely(dpseg == qp->gen_data.sqend))
 			dpseg = mlx5_get_send_wqe(qp, 0);
 
@@ -519,10 +532,10 @@ static int set_data_atom_seg(struct mlx5_qp *qp, int num_sge, struct ibv_sge *sg
 
 static inline int set_data_seg(struct mlx5_qp *qp, void *seg, int *sz, int is_inl,
 		 int num_sge, struct ibv_sge *sg_list, int atom_arg,
-		 int idx, int offset) __attribute__((always_inline));
+		 int idx, int offset, int is_tso) __attribute__((always_inline));
 static inline int set_data_seg(struct mlx5_qp *qp, void *seg, int *sz, int is_inl,
 		 int num_sge, struct ibv_sge *sg_list, int atom_arg,
-		 int idx, int offset)
+		 int idx, int offset, int is_tso)
 {
 	if (is_inl)
 		return set_data_inl_seg(qp, num_sge, sg_list, seg, sz, idx,
@@ -530,7 +543,7 @@ static inline int set_data_seg(struct mlx5_qp *qp, void *seg, int *sz, int is_in
 	if (unlikely(atom_arg))
 		return set_data_atom_seg(qp, num_sge, sg_list, seg, sz, atom_arg);
 
-	return set_data_non_inl_seg(qp, num_sge, sg_list, seg, sz, idx, offset);
+	return set_data_non_inl_seg(qp, num_sge, sg_list, seg, sz, idx, offset, is_tso);
 }
 
 #ifdef MLX5_DEBUG
@@ -944,7 +957,7 @@ static int __mlx5_post_send_one_other(struct ibv_exp_send_wr *wr,
 
 	err = set_data_seg(qp, seg, &size,
 			   !!(exp_send_flags & IBV_EXP_SEND_INLINE),
-			   num_sge, wr->sg_list, 0, 0, 0);
+			   num_sge, wr->sg_list, 0, 0, 0, 0);
 	if (unlikely(err))
 		return err;
 
@@ -960,6 +973,72 @@ static int __mlx5_post_send_one_other(struct ibv_exp_send_wr *wr,
 
 	qp->gen_data.fm_cache = 0;
 	*total_size = size;
+
+	return 0;
+}
+
+/* Copy tso header to eth segment with considering padding and WQE
+ * wrap around in WQ buffer.
+ */
+static inline int set_tso_eth_seg(void **seg, struct ibv_exp_send_wr *wr,
+				  struct mlx5_qp *qp, int *size)
+{
+	void *qend = qp->gen_data.sqend;
+	struct mlx5_wqe_eth_seg *eseg = *seg;
+	int size_of_inl_hdr_start = sizeof(eseg->inline_hdr_start);
+	uint64_t left, left_len, copy_sz;
+	void *pdata = wr->tso.hdr;
+	int err = 0;
+#ifdef MLX5_DEBUG
+	FILE *fp = to_mctx(qp->verbs_qp.qp.context)->dbg_fp;
+#endif
+
+	if (unlikely(wr->tso.hdr_sz < MLX5_ETH_L2_MIN_HEADER_SIZE ||
+		     wr->tso.hdr_sz > qp->max_tso_header)) {
+		mlx5_dbg(fp, MLX5_DBG_QP_SEND,
+			 "TSO header size should be at least %d and at most %d\n",
+			 MLX5_ETH_L2_MIN_HEADER_SIZE,
+			 qp->max_tso_header);
+		return EINVAL;
+	}
+
+	left = wr->tso.hdr_sz;
+	eseg->mss = htons(wr->tso.mss);
+	eseg->inline_hdr_sz = htons(wr->tso.hdr_sz);
+
+	/* Check if there is space till the end of queue, if yes,
+	 * copy all in one shot, otherwise copy till the end of queue,
+	 * rollback and then copy the left
+	 */
+	left_len = qend - (void *)eseg->inline_hdr_start;
+	copy_sz = min(left_len, left);
+
+	memcpy(eseg->inline_hdr_start, pdata, copy_sz);
+
+	*seg += sizeof(struct mlx5_wqe_eth_seg);
+	*size += sizeof(struct mlx5_wqe_eth_seg) / 16;
+
+	/* The -1 is because there are already 16 bytes included in
+	 * eseg->inline_hdr[16]
+	 */
+	*seg += align(copy_sz - size_of_inl_hdr_start, 16) - 16;
+	*size += align(copy_sz - size_of_inl_hdr_start, 16) / 16 - 1;
+
+	/* The last wqe in the queue */
+	if (unlikely(copy_sz < left)) {
+		*seg = mlx5_get_send_wqe(qp, 0);
+		left -= copy_sz;
+		pdata += copy_sz;
+		memcpy(*seg, pdata, left);
+		*seg += align(left, 16);
+		*size += align(left, 16) / 16;
+	}
+
+	err = set_data_seg(qp, *seg, size, 0, wr->num_sge,
+			   wr->sg_list, 0, 0, 0, 1);
+
+	if (unlikely(err))
+		return err;
 
 	return 0;
 }
@@ -997,48 +1076,52 @@ static int __mlx5_post_send_one_raw_packet(struct ibv_exp_send_wr *wr,
 	if (exp_send_flags & IBV_EXP_SEND_IP_CSUM)
 		eseg->cs_flags = MLX5_ETH_WQE_L3_CSUM | MLX5_ETH_WQE_L4_CSUM;
 
-	/* The first bytes of the headers should be copied to the
-	 * inline-headers of the ETH segment.
-	 */
-	if (likely(wr->sg_list[0].length >= MLX5_ETH_INLINE_HEADER_SIZE)) {
-		inl_hdr_copy_size = MLX5_ETH_INLINE_HEADER_SIZE;
-		memcpy(eseg->inline_hdr_start,
-		       (void *)(uintptr_t)wr->sg_list[0].addr,
-		       inl_hdr_copy_size);
+	if (wr->exp_opcode == IBV_EXP_WR_TSO) {
+		err = set_tso_eth_seg(&seg, wr, qp, &size);
 	} else {
-		for (i = 0; i < num_sge && inl_hdr_size > 0; ++i) {
-			inl_hdr_copy_size = min(wr->sg_list[i].length,
-						inl_hdr_size);
-			memcpy(eseg->inline_hdr_start +
-			       (MLX5_ETH_INLINE_HEADER_SIZE - inl_hdr_size),
-			       (void *)(uintptr_t)wr->sg_list[i].addr,
+		/* The first bytes of the headers should be copied to the
+		 * inline-headers of the ETH segment.
+		 */
+		if (likely(wr->sg_list[0].length >= MLX5_ETH_INLINE_HEADER_SIZE)) {
+			inl_hdr_copy_size = MLX5_ETH_INLINE_HEADER_SIZE;
+			memcpy(eseg->inline_hdr_start,
+			       (void *)(uintptr_t)wr->sg_list[0].addr,
 			       inl_hdr_copy_size);
-			inl_hdr_size -= inl_hdr_copy_size;
+		} else {
+			for (i = 0; i < num_sge && inl_hdr_size > 0; ++i) {
+				inl_hdr_copy_size = min(wr->sg_list[i].length,
+							inl_hdr_size);
+				memcpy(eseg->inline_hdr_start +
+				       (MLX5_ETH_INLINE_HEADER_SIZE - inl_hdr_size),
+				       (void *)(uintptr_t)wr->sg_list[i].addr,
+				       inl_hdr_copy_size);
+				inl_hdr_size -= inl_hdr_copy_size;
+			}
+			--i;
+			if (unlikely(inl_hdr_size)) {
+				mlx5_dbg(fp, MLX5_DBG_QP_SEND, "Ethernet headers < %d bytes\n",
+					 MLX5_ETH_INLINE_HEADER_SIZE);
+				return EINVAL;
+			}
 		}
-		--i;
-		if (unlikely(inl_hdr_size)) {
-			mlx5_dbg(fp, MLX5_DBG_QP_SEND, "Ethernet headers < %d bytes\n",
-				 MLX5_ETH_INLINE_HEADER_SIZE);
-			return EINVAL;
+
+		seg += sizeof(struct mlx5_wqe_eth_seg);
+		size += sizeof(struct mlx5_wqe_eth_seg) / 16;
+		eseg->inline_hdr_sz = htons(MLX5_ETH_INLINE_HEADER_SIZE);
+
+		/* If we copied all the sge into the inline-headers, then we need to
+		 * start copying from the next sge into the data-segment.
+		 */
+		if (unlikely(wr->sg_list[i].length == inl_hdr_copy_size)) {
+			++i;
+			inl_hdr_copy_size = 0;
 		}
+
+		/* The copied headers should be excluded from the data segment */
+		err = set_data_seg(qp, seg, &size,
+				   !!(exp_send_flags & IBV_EXP_SEND_INLINE),
+				   num_sge, wr->sg_list, 0, i, inl_hdr_copy_size, 0);
 	}
-
-	seg += sizeof(struct mlx5_wqe_eth_seg);
-	size += sizeof(struct mlx5_wqe_eth_seg) / 16;
-	eseg->inline_hdr_sz = htons(MLX5_ETH_INLINE_HEADER_SIZE);
-
-	/* If we copied all the sge into the inline-headers, then we need to
-	 * start copying from the next sge into the data-segment.
-	 */
-	if (unlikely(wr->sg_list[i].length == inl_hdr_copy_size)) {
-		++i;
-		inl_hdr_copy_size = 0;
-	}
-
-	/* The copied headers should be excluded from the data segment */
-	err = set_data_seg(qp, seg, &size,
-			   !!(exp_send_flags & IBV_EXP_SEND_INLINE),
-			   num_sge, wr->sg_list, 0, i, inl_hdr_copy_size);
 
 	if (unlikely(err))
 		return err;
@@ -1114,7 +1197,7 @@ static int __mlx5_post_send_one_uc_ud(struct ibv_exp_send_wr *wr,
 	}
 
 	err = set_data_seg(qp, seg, &size, !!(exp_send_flags & IBV_EXP_SEND_INLINE),
-			   num_sge, wr->sg_list, 0, 0, 0);
+			   num_sge, wr->sg_list, 0, 0, 0, 0);
 	if (unlikely(err))
 		return err;
 
@@ -1419,7 +1502,7 @@ static int __mlx5_post_send_one_rc_dc(struct ibv_exp_send_wr *wr,
 	}
 
 	err = set_data_seg(qp, seg, &size, !!(exp_send_flags & IBV_EXP_SEND_INLINE),
-			   num_sge, wr->sg_list, atom_arg, 0, 0);
+			   num_sge, wr->sg_list, atom_arg, 0, 0, 0);
 	if (unlikely(err))
 		return err;
 
@@ -1461,7 +1544,7 @@ static inline int __mlx5_post_send_one_fast_rc(struct ibv_exp_send_wr *wr,
 				       &size, 0, 0);
 	else
 		err = set_data_non_inl_seg(qp, wr->num_sge, wr->sg_list, seg,
-					   &size, 0, 0);
+					   &size, 0, 0, 0);
 	if (unlikely(err))
 		return err;
 
@@ -1610,8 +1693,6 @@ static inline int __mlx5_post_send(struct ibv_qp *ibqp, struct ibv_exp_send_wr *
 #ifdef MLX5_DEBUG
 	FILE *fp = to_mctx(ibqp->context)->dbg_fp;
 #endif
-
-
 	mlx5_lock(&qp->sq.lock);
 
 	for (nreq = 0; wr; ++nreq, wr = wr->next) {
@@ -1707,19 +1788,14 @@ int mlx5_exp_peer_commit_qp(struct ibv_qp *ibqp,
 		((uint64_t)qp->gen_data.scur_post << 32);
 	qp->peer_scur_post = qp->gen_data.scur_post;
 
-	wr->type = IBV_EXP_PEER_OP_FENCE;
-	wr->wr.fence.fence_flags = IBV_EXP_PEER_FENCE_OP_READ |
-				   IBV_EXP_PEER_FENCE_FROM_HCA |
-				   IBV_EXP_PEER_FENCE_MEM_SYS;
-	wr = wr->next;
-
 	wr->type = IBV_EXP_PEER_OP_STORE_DWORD;
 	wr->wr.dword_va.data = htonl(qp->gen_data.scur_post & 0xffff);
-	wr->wr.dword_va.target_va = (uint32_t *)qp->gen_data.db + MLX5_SND_DBR;
+	wr->wr.dword_va.target_id = qp->peer_va_ids[MLX5_QP_PEER_VA_ID_DBR];
+	wr->wr.dword_va.offset = sizeof(uint32_t) * MLX5_SND_DBR;
 	wr = wr->next;
 
 	wr->type = IBV_EXP_PEER_OP_FENCE;
-	wr->wr.fence.fence_flags = IBV_EXP_PEER_FENCE_OP_READ |
+	wr->wr.fence.fence_flags = IBV_EXP_PEER_FENCE_OP_WRITE |
 				   IBV_EXP_PEER_FENCE_FROM_HCA;
 	if (qp->peer_db_buf)
 		wr->wr.fence.fence_flags |= IBV_EXP_PEER_FENCE_MEM_PEER;
@@ -1729,8 +1805,8 @@ int mlx5_exp_peer_commit_qp(struct ibv_qp *ibqp,
 
 	wr->type = IBV_EXP_PEER_OP_STORE_QWORD;
 	wr->wr.qword_va.data = *(__be64 *)qp->peer_ctrl_seg;
-	wr->wr.qword_va.target_va = qp->gen_data.bf->reg
-				  + qp->gen_data.bf->offset;
+	wr->wr.qword_va.target_id = qp->peer_va_ids[MLX5_QP_PEER_VA_ID_BF];
+	wr->wr.qword_va.offset = 0;
 
 	qp->peer_ctrl_seg = NULL;
 	commit_ctx->entries = entries;
@@ -2242,7 +2318,7 @@ static inline int send_pending(struct ibv_qp *ibqp, uint64_t addr,
 		if (likely(use_mpw && (qp->mpw.state == MLX5_MPW_STATE_OPENING))) {
 			*start++ = htonl((MLX5_OPC_MOD_MPW << 24) |
 					 ((qp->gen_data.scur_post & 0xFFFF) << 8) |
-					 MLX5_OPCODE_LSO_MPW);
+					 MLX5_OPCODE_TSO);
 			qp->mpw.ctrl_update = start;
 			if ((flags & IBV_EXP_QP_BURST_SIGNALED) ||
 			    (qp->mpw.num_sge >= MLX5_MAX_MPW_SGE)) {

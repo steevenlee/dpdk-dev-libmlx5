@@ -252,7 +252,7 @@ enum {
 	MLX5_OPCODE_RDMA_WRITE_IMM	= 0x09,
 	MLX5_OPCODE_SEND		= 0x0a,
 	MLX5_OPCODE_SEND_IMM		= 0x0b,
-	MLX5_OPCODE_LSO_MPW		= 0x0e,
+	MLX5_OPCODE_TSO			= 0x0e,
 	MLX5_OPC_MOD_MPW		= 0x01, /* OPC_MOD for LSO_MPW opcode */
 	MLX5_OPCODE_RDMA_READ		= 0x10,
 	MLX5_OPCODE_ATOMIC_CS		= 0x11,
@@ -453,6 +453,7 @@ struct mlx5_context {
 		uint8_t			shift;
 	} core_clock;
 	void			       *hca_core_clock;
+	uint32_t			max_tso;
 };
 
 struct mlx5_bitmap {
@@ -715,6 +716,12 @@ enum {
 	CREATE_FLAG_NO_DOORBELL = IBV_EXP_QP_CREATE_INTERNAL_USE
 };
 
+enum {
+	MLX5_QP_PEER_VA_ID_DBR = 0,
+	MLX5_QP_PEER_VA_ID_BF  = 1,
+	MLX5_QP_PEER_VA_ID_MAX = 2
+};
+
 struct mlx5_qp;
 struct general_data_hot {
 	/* post_send hot data */
@@ -816,8 +823,9 @@ struct mlx5_qp {
 	struct ibv_exp_peer_direct_attr	       *peer_ctx;
 	void				       *peer_ctrl_seg;
 	uint32_t				peer_scur_post;
-	uint64_t				peer_va_ids[2];
+	uint64_t				peer_va_ids[MLX5_QP_PEER_VA_ID_MAX];
 	struct ibv_exp_peer_buf		       *peer_db_buf;
+	uint32_t				max_tso_header;
 };
 
 struct mlx5_dct {
