@@ -276,9 +276,10 @@ static void handle_good_req(struct ibv_wc *wc, struct mlx5_cqe64 *cqe)
 	}
 }
 
-static int handle_responder(struct ibv_wc *wc, struct mlx5_cqe64 *cqe,
+static inline int handle_responder(struct ibv_wc *wc, struct mlx5_cqe64 *cqe,
 			    struct mlx5_qp *qp, struct mlx5_srq *srq,
-			    enum mlx5_rsc_type type)
+			    enum mlx5_rsc_type type,
+			    uint64_t *exp_wc_flags)
 {
 	uint16_t	wqe_ctr;
 	struct mlx5_wq *wq;
@@ -327,6 +328,11 @@ static int handle_responder(struct ibv_wc *wc, struct mlx5_cqe64 *cqe,
 		wc->opcode	= IBV_WC_RECV;
 		wc->wc_flags	|= IBV_WC_WITH_IMM;
 		wc->imm_data = cqe->imm_inval_pkey;
+		break;
+	case MLX5_CQE_RESP_SEND_INV:
+		wc->opcode = IBV_WC_RECV;
+		*exp_wc_flags |= IBV_EXP_WC_WITH_INV;
+		wc->imm_data = ntohl(cqe->imm_inval_pkey);
 		break;
 	}
 	wc->slid	   = ntohs(cqe->slid);
@@ -971,7 +977,8 @@ static inline int mlx5_poll_one(struct mlx5_cq *cq,
 	case MLX5_CQE_RESP_SEND_IMM:
 	case MLX5_CQE_RESP_SEND_INV:
 		wc->status = handle_responder((struct ibv_wc *)wc, cqe64, mqp,
-					      is_srq ? *cur_srq : NULL, type);
+					      is_srq ? *cur_srq : NULL, type,
+					      &exp_wc_flags);
 		if (mqp &&
 		    (mqp->gen_data.model_flags & MLX5_QP_MODEL_RX_CSUM_IP_OK_IP_NON_TCP_UDP)) {
 			l3_hdr = (cqe64->l4_hdr_type_etc) & MLX5_CQE_L3_HDR_TYPE_MASK;

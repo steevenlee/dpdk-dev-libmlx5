@@ -63,6 +63,7 @@ enum {
 static const uint32_t mlx5_ib_opcode[] = {
 	[IBV_EXP_WR_SEND]                       = MLX5_IB_OPCODE(MLX5_OPCODE_SEND,                MLX5_OPCODE_BASIC, 0),
 	[IBV_EXP_WR_SEND_WITH_IMM]              = MLX5_IB_OPCODE(MLX5_OPCODE_SEND_IMM,            MLX5_OPCODE_BASIC, MLX5_OPCODE_WITH_IMM),
+	[IBV_EXP_WR_SEND_WITH_INV]		= MLX5_IB_OPCODE(MLX5_OPCODE_SEND_INVAL,          MLX5_OPCODE_BASIC, MLX5_OPCODE_WITH_IMM),
 	[IBV_EXP_WR_RDMA_WRITE]                 = MLX5_IB_OPCODE(MLX5_OPCODE_RDMA_WRITE,          MLX5_OPCODE_BASIC, 0),
 	[IBV_EXP_WR_RDMA_WRITE_WITH_IMM]        = MLX5_IB_OPCODE(MLX5_OPCODE_RDMA_WRITE_IMM,      MLX5_OPCODE_BASIC, MLX5_OPCODE_WITH_IMM),
 	[IBV_EXP_WR_RDMA_READ]                  = MLX5_IB_OPCODE(MLX5_OPCODE_RDMA_READ,           MLX5_OPCODE_BASIC, 0),
@@ -1491,7 +1492,9 @@ static int __mlx5_post_send_one_rc_dc(struct ibv_exp_send_wr *wr,
 
 		case IBV_EXP_WR_NOP:
 			break;
-
+		case IBV_EXP_WR_SEND_WITH_INV:
+			imm = htonl(wr->ex.invalidate_rkey);
+			break;
 		default:
 			break;
 		}
