@@ -202,6 +202,7 @@ static void handle_ec_comp(struct mlx5_ec_calc *calc, struct ibv_wc *wc)
 {
 	struct mlx5_ec_comp *comp;
 	struct ibv_exp_ec_comp *ec_comp;
+	enum ibv_exp_ec_status status;
 
 	if (unlikely(wc->opcode == IBV_WC_SEND)) {
 		fprintf(stderr, "calc %p got IBV_WC_SEND completion\n", calc);
@@ -212,14 +213,18 @@ static void handle_ec_comp(struct mlx5_ec_calc *calc, struct ibv_wc *wc)
 	if (comp->ec_mat)
 		mlx5_put_ec_mat(calc, comp->ec_mat);
 
-	ec_comp = comp->comp;
 	if (likely(wc->status == IBV_WC_SUCCESS))
-		ec_comp->status = IBV_EXP_EC_CALC_SUCCESS;
+		status = IBV_EXP_EC_CALC_SUCCESS;
 	else
-		ec_comp->status = IBV_EXP_EC_CALC_FAIL;
+		status = IBV_EXP_EC_CALC_FAIL;
 
+	ec_comp = comp->comp;
 	mlx5_put_ec_comp(calc, comp);
-	ec_comp->done(ec_comp);
+
+	if (ec_comp) {
+		ec_comp->status = status;
+		ec_comp->done(ec_comp);
+	}
 }
 
 static int ec_poll_cq(struct mlx5_ec_calc *calc, int budget)
@@ -358,7 +363,12 @@ struct ibv_qp *alloc_calc_qp(struct mlx5_ec_calc *calc)
 	/* modify to RTR */
 	memset(&qp_attr, 0, sizeof(qp_attr));
 	qp_attr.qp_state = IBV_QPS_RTR;
-	qp_attr.path_mtu = IBV_MTU_4096; /* FIXME: Is this correct? */
+	/* FIXME: increasing qp_attr.path_mtu improves performance
+	 * But today on RoCE we got default port mtu (and thus rxb) 1500
+	 * We cannot have qp mtu greater than rxb
+	 * Waiting for FW to fix it
+	 */
+	qp_attr.path_mtu = IBV_MTU_1024;
 	qp_attr.dest_qp_num = ibqp->qp_num;
 	qp_attr.rq_psn = 0;
 	qp_attr.max_dest_rd_atomic = 0;
@@ -1407,9 +1417,14 @@ static int __mlx5_ec_decode_async(struct mlx5_ec_calc *calc,
 	struct ibv_sge out, in;
 	void *uninitialized_var(seg);
 	unsigned idx;
-	int err, size, k = 0, m = 0, wqe_count = 0;
+	int err, size, i, k = 0, m = 0, wqe_count = 0, num_erasures = 0;
 
-	decode = mlx5_get_ec_decode_mat(calc, decode_matrix, k, m);
+	for (i = 0; i < calc->k + calc->m; i++)
+		if (erasures[i])
+			num_erasures++;
+
+	decode = mlx5_get_ec_decode_mat(calc, decode_matrix,
+					calc->k, num_erasures);
 
 	comp = mlx5_get_ec_comp(calc, decode, ec_comp);
 	if (unlikely(!comp)) {
