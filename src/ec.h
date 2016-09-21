@@ -70,6 +70,7 @@ struct mlx5_ec_comp {
 	struct ibv_exp_ec_comp	*comp;
 	struct mlx5_ec_mat	*ec_mat;
 	struct ibv_mr		*outumr;
+	struct ibv_mr		*inumr;
 	struct list_head	node;
 };
 
@@ -84,11 +85,9 @@ struct mlx5_ec_calc {
 	struct ibv_pd		*pd;
 	struct ibv_qp		*qp;
 	struct ibv_cq		*cq;
-	struct ibv_wc		wcs[EC_POLL_BATCH];
 	struct ibv_comp_channel *channel;
 	uint8_t			log_chunk_size;
 	uint16_t		cq_count;
-	struct ibv_mr		*inumr;
 	uint8_t			*mat;
 	struct ibv_mr		*mat_mr;
 	struct mlx5_ec_mat_pool mat_pool;
