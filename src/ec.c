@@ -229,16 +229,18 @@ static void handle_ec_comp(struct mlx5_ec_calc *calc, struct ibv_wc *wc)
 
 static int ec_poll_cq(struct mlx5_ec_calc *calc, int budget)
 {
+	struct ibv_wc wcs[EC_POLL_BATCH];
+	int poll_batch = min(EC_POLL_BATCH, budget);
 	int i, n, count = 0;
 
-	while ((n = ibv_poll_cq(calc->cq, EC_POLL_BATCH, calc->wcs)) > 0) {
+	while ((n = ibv_poll_cq(calc->cq, poll_batch, wcs)) > 0) {
 		if (unlikely(n < 0)) {
 			fprintf(stderr, "poll CQ failed\n");
 			return n;
 		}
 
 		for (i = 0; i < n; i++)
-			handle_ec_comp(calc, &calc->wcs[i]);
+			handle_ec_comp(calc, &wcs[i]);
 
 		count += n;
 		if (count >= budget)
@@ -484,9 +486,10 @@ static void free_comps(struct mlx5_ec_calc *calc)
 	int comp_num = calc->max_inflight_calcs;
 	int i;
 
-	for (i = 0; i < comp_num; i++)
+	for (i = 0; i < comp_num; i++) {
+		mlx5_dereg_mr(calc->comp_pool.comps[i].inumr);
 		mlx5_dereg_mr(calc->comp_pool.comps[i].outumr);
-
+	}
 	free(calc->comp_pool.comps);
 }
 
@@ -506,19 +509,27 @@ static int alloc_comps(struct mlx5_ec_calc *calc)
 	}
 
 	for (i = 0; i < comp_num; i++) {
+		pool->comps[i].inumr = reg_umr(calc->pd, calc->k);
+		if (!pool->comps[i].inumr) {
+			fprintf(stderr, "calc %p failed to register inumr\n", calc);
+			goto free_umrs;
+		}
 		pool->comps[i].outumr = reg_umr(calc->pd, calc->m);
 		if (!pool->comps[i].outumr) {
 			fprintf(stderr, "calc %p failed to register outumr\n", calc);
-			goto free_umrs;
+			goto free_inumr;
 		}
 		list_add_tail(&pool->comps[i].node, &pool->list);
 	}
 
 	return 0;
 
+free_inumr:
+		mlx5_dereg_mr(pool->comps[i].inumr);
 free_umrs:
 	for (j = 0 ; j < i ; j++) {
 		list_del_init(&pool->comps[j].node);
+		mlx5_dereg_mr(pool->comps[j].inumr);
 		mlx5_dereg_mr(pool->comps[j].outumr);
 	}
 	free(pool->comps);
@@ -677,7 +688,8 @@ mlx5_alloc_ec_calc(struct ibv_pd *pd,
 	ibcalc = (struct ibv_exp_ec_calc *)&calc->ibcalc;
 
 	calc->pd = ibcalc->pd = pd;
-	calc->max_inflight_calcs = attr->max_inflight_calcs;
+	/* we need extra inflights for encode_send operation */
+	calc->max_inflight_calcs = attr->max_inflight_calcs + EC_POLL_BATCH;
 	calc->k = attr->k;
 	calc->m = attr->m;
 
@@ -688,7 +700,7 @@ mlx5_alloc_ec_calc(struct ibv_pd *pd,
 	};
 
 	calc->cq = ibv_create_cq(calc->pd->context,
-				 attr->max_inflight_calcs * MLX5_EC_CQ_FACTOR,
+				 calc->max_inflight_calcs * MLX5_EC_CQ_FACTOR,
 				 NULL, calc->channel, attr->affinity_hint);
 	if (!calc->cq) {
 		fprintf(stderr, "failed to alloc calc cq\n");
@@ -708,15 +720,9 @@ mlx5_alloc_ec_calc(struct ibv_pd *pd,
 		goto free_cq;
 	}
 
-	calc->inumr = reg_umr(calc->pd, calc->k);
-	if (!calc->inumr) {
-		fprintf(stderr, "failed to alloc calc in umr\n");
-		goto free_ec_poller;
-	};
-
 	err = reg_encode_matrix(calc, attr->encode_matrix);
 	if (err)
-		goto free_inumr;
+		goto free_ec_poller;
 
 	calc->qp = alloc_calc_qp(calc);
 	if (!calc->qp)
@@ -744,8 +750,6 @@ calc_qp:
 	ibv_destroy_qp(calc->qp);
 encode_matrix:
 	dereg_encode_matrix(calc);
-free_inumr:
-	mlx5_dereg_mr(calc->inumr);
 free_ec_poller:
 	calc->stop_ec_poller = 1;
 	wmb();
@@ -772,7 +776,6 @@ mlx5_dealloc_ec_calc(struct ibv_exp_ec_calc *ec_calc)
 	free_matrices(calc);
 	ibv_destroy_qp(calc->qp);
 	dereg_encode_matrix(calc);
-	mlx5_dereg_mr(calc->inumr);
 
 	calc->stop_ec_poller = 1;
 	wmb();
@@ -1089,6 +1092,7 @@ out:
 }
 
 static int mlx5_set_encode_data(struct mlx5_ec_calc *calc,
+				struct mlx5_ec_comp *comp,
 				struct ibv_exp_ec_mem *ec_mem,
 				struct ibv_sge *in,
 				int *contig)
@@ -1111,7 +1115,7 @@ static int mlx5_set_encode_data(struct mlx5_ec_calc *calc,
 		     ec_mem->data_blocks[i - 1].addr +
 		     ec_mem->data_blocks[i - 1].length))) {
 			*contig = 0;
-			lkey = calc->inumr->lkey;
+			lkey = comp->inumr->lkey;
 		}
 	}
 
@@ -1147,7 +1151,7 @@ static int __mlx5_ec_encode_async(struct mlx5_ec_calc *calc,
 	if (unlikely(err))
 		goto comp_error;
 
-	err = mlx5_set_encode_data(calc, ec_mem, &in, &contig);
+	err = mlx5_set_encode_data(calc, comp, ec_mem, &in, &contig);
 	if (unlikely(err))
 		goto comp_error;
 
@@ -1169,7 +1173,7 @@ static int __mlx5_ec_encode_async(struct mlx5_ec_calc *calc,
 		/* post UMR of input - non-signaled */
 		idx = begin_wqe(qp, &seg);
 		post_ec_umr(calc, ec_mem->data_blocks, k,
-			    ec_mem->block_size, 0, calc->inumr->lkey,
+			    ec_mem->block_size, 0, comp->inumr->lkey,
 			    &seg, &size);
 		finish_wqe(qp, idx, size, NULL);
 		wqe_count++;
@@ -1387,7 +1391,7 @@ static int set_decode_klms(struct mlx5_ec_calc *calc,
 	}
 
 	k = calc->k;
-	in->lkey = calc->inumr->lkey;
+	in->lkey = comp->inumr->lkey;
 	in->addr = iklms[0].addr;
 	in->length = ec_mem->block_size * k;
 	*in_num = k;
@@ -1456,7 +1460,7 @@ static int __mlx5_ec_decode_async(struct mlx5_ec_calc *calc,
 	/* post UMR of input - non-signaled */
 	idx = begin_wqe(qp, &seg);
 	post_ec_umr(calc, in_klms, k, ec_mem->block_size,
-		    0, calc->inumr->lkey, &seg, &size);
+		    0, comp->inumr->lkey, &seg, &size);
 	finish_wqe(qp, idx, size, NULL);
 	wqe_count++;
 
@@ -1627,6 +1631,19 @@ int mlx5_ec_encode_send(struct ibv_exp_ec_calc *ec_calc,
 		}
 	}
 
+	/*
+	 * In encode_send operation we don't indicate the user whether
+	 * the calculation was over nor the completion was consumed,
+	 * therefore we must poll the cq to ensure we have resources for
+	 * the next calculation.
+	 */
+	if (ec_poll_cq(calc, 1)) {
+		err = ibv_req_notify_cq(calc->cq, 0);
+		if (unlikely(err)) {
+			fprintf(stderr, "Couldn't request CQ notification\n");
+			return err;
+		}
+	}
 	mlx5_lock(&qp->sq.lock);
 	/* post async encode */
 	err = __mlx5_ec_encode_async(calc, calc->k, calc->m, calc->mat,
