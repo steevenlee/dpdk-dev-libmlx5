@@ -99,6 +99,7 @@ struct mlx5_ec_calc {
 	int			k;
 	int			m;
 	int			max_inflight_calcs;
+	int			polling;
 };
 
 static inline struct mlx5_ec_calc *to_mcalc(struct ibv_exp_ec_calc *ec_calc)

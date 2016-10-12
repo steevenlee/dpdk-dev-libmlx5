@@ -692,6 +692,7 @@ mlx5_alloc_ec_calc(struct ibv_pd *pd,
 	calc->max_inflight_calcs = attr->max_inflight_calcs + EC_POLL_BATCH;
 	calc->k = attr->k;
 	calc->m = attr->m;
+	calc->polling = attr->polling;
 
 	calc->channel = ibv_create_comp_channel(calc->pd->context);
 	if (!calc->channel) {
@@ -707,17 +708,19 @@ mlx5_alloc_ec_calc(struct ibv_pd *pd,
 		goto free_channel;
 	};
 
-	err = ibv_req_notify_cq(calc->cq, 0);
-	if (err) {
-		fprintf(stderr, "failed to req notify cq\n");
-		goto free_cq;
-	}
+	if (!calc->polling) {
+		err = ibv_req_notify_cq(calc->cq, 0);
+		if (err) {
+			fprintf(stderr, "failed to req notify cq\n");
+			goto free_cq;
+		}
 
-	err = pthread_create(&calc->ec_poller, NULL,
-			     handle_comp_events, calc);
-	if (err) {
-		fprintf(stderr, "failed to create ec_poller\n");
-		goto free_cq;
+		err = pthread_create(&calc->ec_poller, NULL,
+				     handle_comp_events, calc);
+		if (err) {
+			fprintf(stderr, "failed to create ec_poller\n");
+			goto free_cq;
+		}
 	}
 
 	err = reg_encode_matrix(calc, attr->encode_matrix);
@@ -751,10 +754,12 @@ calc_qp:
 encode_matrix:
 	dereg_encode_matrix(calc);
 free_ec_poller:
-	calc->stop_ec_poller = 1;
-	wmb();
-	pthread_kill(calc->ec_poller, SIGINT);
-	pthread_join(calc->ec_poller, &status);
+	if (!calc->polling) {
+		calc->stop_ec_poller = 1;
+		wmb();
+		pthread_kill(calc->ec_poller, SIGINT);
+		pthread_join(calc->ec_poller, &status);
+	}
 free_cq:
 	ibv_destroy_cq(calc->cq);
 free_channel:
@@ -777,10 +782,12 @@ mlx5_dealloc_ec_calc(struct ibv_exp_ec_calc *ec_calc)
 	ibv_destroy_qp(calc->qp);
 	dereg_encode_matrix(calc);
 
-	calc->stop_ec_poller = 1;
-	wmb();
-	pthread_kill(calc->ec_poller, SIGINT);
-	pthread_join(calc->ec_poller, &status);
+	if (!calc->polling) {
+		calc->stop_ec_poller = 1;
+		wmb();
+		pthread_kill(calc->ec_poller, SIGINT);
+		pthread_join(calc->ec_poller, &status);
+	}
 
 	ibv_destroy_cq(calc->cq);
 	ibv_destroy_comp_channel(calc->channel);
@@ -1620,6 +1627,11 @@ int mlx5_ec_encode_send(struct ibv_exp_ec_calc *ec_calc,
 	struct ibv_exp_send_wr *bad_exp_wr;
 	struct ibv_send_wr *bad_wr;
 	int i, err;
+
+	if (calc->polling) {
+		fprintf(stderr, "encode_send is not supported in polling mode\n");
+		return -EINVAL;
+	}
 
 	/* stripe data */
 	for (i = 0; i < calc->k; i++) {
