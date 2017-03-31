@@ -1095,7 +1095,8 @@ struct ibv_srq *mlx5_create_srq(struct ibv_pd *pd,
 		goto err_free;
 	}
 
-	*srq->db = 0;
+	srq->db[MLX5_RCV_DBR] = 0;
+	srq->db[MLX5_SND_DBR] = 0;
 
 	cmd.buf_addr = (uintptr_t) srq->buf.buf;
 	cmd.db_addr  = (uintptr_t) srq->db;
@@ -1413,7 +1414,7 @@ static int get_send_sge(struct ibv_exp_qp_init_attr *attr, int wqe_size, struct 
 		max_sge = (wqe_size - overhead) /
 		sizeof(struct mlx5_wqe_data_seg);
 
-	return min(max_sge, wqe_size - overhead /
+	return min(max_sge, (wqe_size - overhead) /
 		   sizeof(struct mlx5_wqe_data_seg));
 }
 
@@ -3160,7 +3161,8 @@ struct ibv_srq *mlx5_create_xrc_srq(struct ibv_context *context,
 		goto err_free;
 	}
 
-	*msrq->db = 0;
+	msrq->db[MLX5_RCV_DBR] = 0;
+	msrq->db[MLX5_SND_DBR] = 0;
 
 	cmd.buf_addr = (uintptr_t) msrq->buf.buf;
 	cmd.db_addr  = (uintptr_t) msrq->db;
