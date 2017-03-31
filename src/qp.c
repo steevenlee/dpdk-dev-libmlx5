@@ -304,14 +304,23 @@ int mlx5_copy_to_send_wqe(struct mlx5_qp *qp, int idx, void *buf, int size)
 	scat = p;
 	max = (ntohl(ctrl->qpn_ds) & 0x3F) - (((void *)scat - (void *)ctrl) >> 4);
 	if (unlikely((void *)(scat + max) > qp->gen_data.sqend)) {
-		int tmp = ((void *)qp->gen_data.sqend - (void *)scat) >> 4;
-		int orig_size = size;
+		unsigned int scat_offset = 0;
 
-		if (copy_to_scat(scat, buf, &size, tmp, convert2host_endianness) == IBV_WC_SUCCESS)
-			return IBV_WC_SUCCESS;
-		max = max - tmp;
-		buf += orig_size - size;
-		scat = mlx5_get_send_wqe(qp, 0);
+		if ((void *)scat < qp->gen_data.sqend) {
+			int tmp = (qp->gen_data.sqend - (void *)scat) >> 4;
+			int orig_size = size;
+
+			if (copy_to_scat(scat, buf, &size, tmp,
+				convert2host_endianness) == IBV_WC_SUCCESS)
+				return IBV_WC_SUCCESS;
+
+			max = max - tmp;
+			buf += orig_size - size;
+		} else {
+			scat_offset = (void *)scat - qp->gen_data.sqend;
+		}
+
+		scat = mlx5_get_send_wqe(qp, 0) + scat_offset;
 	}
 
 	return copy_to_scat(scat, buf, &size, max, convert2host_endianness);
@@ -2369,6 +2378,7 @@ int mlx5_post_task(struct ibv_context *context,
 	int rc = 0;
 	struct ibv_exp_task *cur_task = NULL;
 	struct ibv_exp_send_wr *bad_wr;
+	struct ibv_recv_wr *bad_wr_r;
 	struct mlx5_context *mlx5_ctx = to_mctx(context);
 
 	if (!task_list)
@@ -2389,7 +2399,7 @@ int mlx5_post_task(struct ibv_context *context,
 		case IBV_EXP_TASK_RECV:
 			rc = ibv_post_recv(cur_task->item.qp,
 					cur_task->item.recv_wr,
-					NULL);
+					&bad_wr_r);
 			break;
 
 		default:
