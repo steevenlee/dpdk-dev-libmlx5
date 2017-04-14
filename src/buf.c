@@ -41,6 +41,7 @@
 #include <stdlib.h>
 #include <errno.h>
 #include <sched.h>
+#include <stdlib.h>
 
 #ifdef HAVE_NUMA
 #include <numa.h>
@@ -347,6 +348,49 @@ static void free_huge_buf(struct mlx5_context *ctx, struct mlx5_buf *buf)
 		mlx5_spin_unlock(&ctx->hugetlb_lock);
 }
 
+void
+mlx5_free_buf_ext(struct mlx5_context *ctx, struct mlx5_buf *buf)
+{
+	char *val;
+
+	val = getenv("MLX5_FREE_EXTERNAL");
+	if (val != NULL) {
+		void (*func)(void *);
+
+		sscanf(val, "%p", &func);
+		(*func)(buf->buf);
+		buf->buf = NULL;
+		buf->length = 0;
+		return;
+	}
+	mlx5_dbg(stderr, MLX5_DBG_CONTIG,
+		 "External mode free failed");
+}
+
+int
+mlx5_alloc_buf_ext(struct mlx5_context *ctx, struct mlx5_buf *buf, size_t size)
+{
+	char *val;
+
+	val = getenv("MLX5_ALLOC_EXTERNAL");
+	if (val != NULL) {
+		void *(*func)(int);
+		void *addr;
+
+		sscanf(val, "%p", &func);
+		addr = (*func)(size);
+		if (addr) {
+			buf->buf = addr;
+			buf->length = size;
+			buf->type = MLX5_ALLOC_TYPE_EXTERNAL;
+			return 0;
+		}
+	}
+	mlx5_dbg(stderr, MLX5_DBG_CONTIG,
+		 "External mode allocation failed");
+	return 0;
+}
+
 static int alloc_preferred_buf(struct mlx5_context *mctx,
 			       struct mlx5_buf *buf,
 			       size_t size, int page_size,
@@ -407,6 +451,9 @@ static int alloc_preferred_buf(struct mlx5_context *mctx,
 			 "Contig allocation failed, fallback to default mode\n");
 	}
 
+	if (type == MLX5_ALLOC_TYPE_EXTERNAL)
+		return mlx5_alloc_buf_ext(mctx, buf, size);
+
 	return mlx5_alloc_buf(buf, size, page_size);
 }
 
@@ -462,6 +509,10 @@ int mlx5_free_actual_buf(struct mlx5_context *ctx, struct mlx5_buf *buf)
 	case MLX5_ALLOC_TYPE_CONTIG:
 		mlx5_free_buf_contig(ctx, buf);
 		break;
+	
+	case MLX5_ALLOC_TYPE_EXTERNAL:
+		mlx5_free_buf_ext(ctx, buf);
+		break;
 	default:
 		fprintf(stderr, "Bad allocation type\n");
 	}
@@ -502,6 +553,7 @@ void mlx5_get_alloc_type(struct ibv_context *context,
 {
 	char env_value[VERBS_MAX_ENV_VAL];
 	char name[128];
+	char *env;
 
 	snprintf(name, sizeof(name), "%s_ALLOC_TYPE", component);
 
@@ -521,6 +573,10 @@ void mlx5_get_alloc_type(struct ibv_context *context,
 		else if (!strcasecmp(env_value, "ALL"))
 			*alloc_type = MLX5_ALLOC_TYPE_ALL;
 	}
+
+	env = getenv(name);
+	if (env && !strcasecmp(env, "EXTERNAL"))
+	       	*alloc_type = MLX5_ALLOC_TYPE_EXTERNAL; 
 }
 
 static void mlx5_alloc_get_env_info(struct ibv_context *context,

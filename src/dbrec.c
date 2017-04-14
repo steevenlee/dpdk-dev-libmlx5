@@ -57,6 +57,9 @@ static struct mlx5_db_page *__add_page(struct mlx5_context *context)
 	int pp;
 	int i;
 	int nlong;
+	enum mlx5_alloc_type type;
+	enum mlx5_alloc_type default_type = MLX5_ALLOC_TYPE_ANON;
+	int ret;
 
 	pp = ps / context->cache_line_size;
 	nlong = (pp + 8 * sizeof(long) - 1) / (8 * sizeof(long));
@@ -65,7 +68,12 @@ static struct mlx5_db_page *__add_page(struct mlx5_context *context)
 	if (!page)
 		return NULL;
 
-	if (mlx5_alloc_buf(&page->buf, ps, ps)) {
+	mlx5_get_alloc_type(&context->ibv_ctx, MLX5_CQ_PREFIX, &type, default_type);
+	if (type == MLX5_ALLOC_TYPE_EXTERNAL)
+		ret = mlx5_alloc_buf_ext(context, &page->buf, ps);
+	else
+		ret = mlx5_alloc_buf(&page->buf, ps, ps);
+	if (ret) {
 		free(page);
 		return NULL;
 	}
@@ -143,7 +151,10 @@ void mlx5_free_db(struct mlx5_context *context, volatile uint32_t *db)
 		if (page->next)
 			page->next->prev = page->prev;
 
-		mlx5_free_buf(&page->buf);
+		if (page->buf.type == MLX5_ALLOC_TYPE_EXTERNAL)
+			mlx5_free_buf_ext(context, &page->buf);
+		else
+			mlx5_free_buf(&page->buf);
 		free(page);
 	}
 

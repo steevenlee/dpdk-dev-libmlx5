@@ -1648,7 +1648,12 @@ static int mlx5_alloc_rwq_buf(struct ibv_context *context,
 {
 	int err;
 	enum mlx5_alloc_type default_alloc_type = MLX5_ALLOC_TYPE_PREFER_CONTIG;
+	enum mlx5_alloc_type alloc_type;
 
+	mlx5_get_alloc_type(context, MLX5_RWQ_PREFIX, &alloc_type,
+			    default_alloc_type);
+	if (alloc_type == MLX5_ALLOC_TYPE_EXTERNAL)
+		default_alloc_type = alloc_type;
 	rwq->rq.wrid = malloc(rwq->rq.wqe_cnt * sizeof(uint64_t));
 	if (!rwq->rq.wrid) {
 		errno = ENOMEM;

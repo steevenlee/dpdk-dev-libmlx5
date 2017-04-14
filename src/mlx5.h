@@ -298,6 +298,7 @@ enum mlx5_alloc_type {
 	MLX5_ALLOC_TYPE_PEER_DIRECT,
 	MLX5_ALLOC_TYPE_PREFER_HUGE,
 	MLX5_ALLOC_TYPE_PREFER_CONTIG,
+	MLX5_ALLOC_TYPE_EXTERNAL,
 	MLX5_ALLOC_TYPE_ALL
 };
 
@@ -1281,6 +1282,11 @@ int mlx5_exp_peer_peek_cq(struct ibv_cq *cq,
 			  struct ibv_exp_peer_peek *peek_ctx);
 int mlx5_exp_peer_abort_peek_cq(struct ibv_cq *ibcq,
 				struct ibv_exp_peer_abort_peek *ack_ctx);
+
+int
+mlx5_alloc_buf_ext(struct mlx5_context *ctx, struct mlx5_buf *buf, size_t size);
+void
+mlx5_free_buf_ext(struct mlx5_context *ctx, struct mlx5_buf *buf);
 
 static inline void *mlx5_find_uidx(struct mlx5_context *ctx, uint32_t uidx)
 {
