@@ -8,7 +8,7 @@
 %endif
 
 Name: libmlx5
-Version: 1.2.1mlnx1
+Version: 41mlnx1
 Release: 1%{?dist}
 Summary: Mellanox ConnectX-IB InfiniBand HCA Userspace Driver
 
