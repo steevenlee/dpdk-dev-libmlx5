@@ -51,6 +51,7 @@
 
 #include "mlx5.h"
 #include "mlx5-abi.h"
+#include "mlx5dv.h"
 #include "ec.h"
 
 #ifndef PCI_VENDOR_ID_MELLANOX
@@ -1097,3 +1098,23 @@ struct ibv_device *openib_driver_init(struct sysfs_class_device *sysdev)
 	return mlx5_driver_init(sysdev->path, abi_ver);
 }
 #endif /* HAVE_IBV_REGISTER_DRIVER */
+
+int mlx5dv_context_attr_set(struct ibv_context *ibv_ctx,
+			enum mlx5dv_ctx_attr_type type, void *attr) {
+	struct mlx5_context *ctx = to_mctx(ibv_ctx);
+	struct mlx5dv_ctx_attr_allocators *alctr;
+
+	switch (type) {
+	case MLX5DV_CTX_ATTR_BUF_ALLOCATORS:
+		alctr = (struct mlx5dv_ctx_attr_allocators *) ((uintptr_t) attr);
+		if (alctr) {
+			ctx->extern_alloc_buf = alctr->alloc_buf;
+			ctx->extern_free_buf = alctr->free_buf;
+			return 0;
+		} else
+			return -EINVAL;
+		break;
+	default:
+		return -EINVAL;
+	}
+}

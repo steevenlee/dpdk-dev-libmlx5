@@ -466,6 +466,9 @@ struct mlx5_context {
 	void			       *hca_core_clock;
 	uint32_t			max_tso;
 	int				cmds_supp_uhw;
+
+	void *(*extern_alloc_buf)(size_t size, int alignment);
+	void (*extern_free_buf)(void *ptr);
 };
 
 struct mlx5_bitmap {
@@ -1283,10 +1286,9 @@ int mlx5_exp_peer_peek_cq(struct ibv_cq *cq,
 int mlx5_exp_peer_abort_peek_cq(struct ibv_cq *ibcq,
 				struct ibv_exp_peer_abort_peek *ack_ctx);
 
-int
-mlx5_alloc_buf_ext(struct mlx5_context *ctx, struct mlx5_buf *buf, size_t size);
-void
-mlx5_free_buf_ext(struct mlx5_context *ctx, struct mlx5_buf *buf);
+int mlx5_alloc_buf_extern(struct mlx5_context *ctx, struct mlx5_buf *buf,
+				size_t size, int alignment);
+void mlx5_free_buf_extern(struct mlx5_context *ctx, struct mlx5_buf *buf);
 
 static inline void *mlx5_find_uidx(struct mlx5_context *ctx, uint32_t uidx)
 {
