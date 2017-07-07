@@ -351,6 +351,7 @@ static void free_huge_buf(struct mlx5_context *ctx, struct mlx5_buf *buf)
 void mlx5_free_buf_extern(struct mlx5_context *ctx, struct mlx5_buf *buf)
 {
 	if (ctx->extern_free_buf!= NULL) {
+		ibv_dofork_range(buf->buf, buf->length);
 		ctx->extern_free_buf(buf->buf);
 		buf->buf = NULL;
 		buf->length = 0;
@@ -367,8 +368,14 @@ mlx5_alloc_buf_extern(struct mlx5_context *ctx, struct mlx5_buf *buf,
 	void *addr;
 
 	if (ctx->extern_alloc_buf != NULL) {
-		addr = (*ctx->extern_alloc_buf)(size, alignment);
+		addr = ctx->extern_alloc_buf(size, alignment);
 		if (addr) {
+			if (ibv_dontfork_range(addr, size)) {
+				mlx5_dbg(stderr, MLX5_DBG_CONTIG,
+					 "External mode dontfork_range failed");
+				ctx->extern_free_buf(addr);
+				return -1;
+			}
 			buf->buf = addr;
 			buf->length = size;
 			buf->type = MLX5_ALLOC_TYPE_EXTERNAL;
