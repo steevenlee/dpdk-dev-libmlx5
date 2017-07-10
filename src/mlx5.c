@@ -656,13 +656,15 @@ static void set_experimental(struct ibv_context *ctx)
 	verbs_set_exp_ctx_op(verbs_exp_ctx, exp_peer_abort_peek_cq, mlx5_exp_peer_abort_peek_cq);
 }
 
-void *mlx5_uar_mmap(int idx, int cmd, int page_size, int cmd_fd)
+void *mlx5_uar_mmap(int idx, int cmd, int page_size, int cmd_fd, off_t *o_offset)
 {
 	off_t offset;
 
 	offset = 0;
 	set_command(cmd, &offset);
 	set_index(idx, &offset);
+	if (o_offset)
+		*o_offset = offset * page_size;
 
 	return mmap(NULL, page_size, PROT_WRITE, MAP_SHARED, cmd_fd, page_size * offset);
 }
@@ -874,7 +876,8 @@ static int mlx5_alloc_context(struct verbs_device *vdev,
 
 		/* Don't map UAR to WC if BF is not used */
 		if (!context->shut_up_bf) {
-			context->uar[i].regs = mlx5_uar_mmap(i, MLX5_MMAP_GET_WC_PAGES_CMD, page_size, cmd_fd);
+			context->uar[i].regs = mlx5_uar_mmap(i, MLX5_MMAP_GET_WC_PAGES_CMD,
+					page_size, cmd_fd, &context->uar[i].offset);
 			if (context->uar[i].regs != MAP_FAILED) {
 				context->uar[i].map_type = MLX5_UAR_MAP_WC;
 				uar_mapped = 1;
@@ -882,7 +885,8 @@ static int mlx5_alloc_context(struct verbs_device *vdev,
 		}
 
 		if (!uar_mapped) {
-			context->uar[i].regs = mlx5_uar_mmap(i, MLX5_MMAP_GET_NC_PAGES_CMD, page_size, cmd_fd);
+			context->uar[i].regs = mlx5_uar_mmap(i, MLX5_MMAP_GET_NC_PAGES_CMD,
+					page_size, cmd_fd, &context->uar[i].offset);
 			if (context->uar[i].regs != MAP_FAILED) {
 				context->uar[i].map_type = MLX5_UAR_MAP_NC;
 				uar_mapped = 1;
@@ -891,7 +895,8 @@ static int mlx5_alloc_context(struct verbs_device *vdev,
 
 		if (!uar_mapped) {
 			/* for backward compatibility with old kernel driver */
-			context->uar[i].regs = mlx5_uar_mmap(i, MLX5_MMAP_GET_REGULAR_PAGES_CMD, page_size, cmd_fd);
+			context->uar[i].regs = mlx5_uar_mmap(i, MLX5_MMAP_GET_REGULAR_PAGES_CMD,
+					page_size, cmd_fd, &context->uar[i].offset);
 			if (context->uar[i].regs != MAP_FAILED) {
 				context->uar[i].map_type = MLX5_UAR_MAP_WC;
 				legacy_uar_map = 1;
@@ -1100,7 +1105,8 @@ struct ibv_device *openib_driver_init(struct sysfs_class_device *sysdev)
 #endif /* HAVE_IBV_REGISTER_DRIVER */
 
 int mlx5dv_context_attr_set(struct ibv_context *ibv_ctx,
-			enum mlx5dv_ctx_attr_type type, void *attr) {
+			enum mlx5dv_ctx_attr_type type, void *attr)
+{
 	struct mlx5_context *ctx = to_mctx(ibv_ctx);
 	struct mlx5dv_ctx_attr_allocators *alctr;
 
@@ -1113,6 +1119,44 @@ int mlx5dv_context_attr_set(struct ibv_context *ibv_ctx,
 			return 0;
 		} else
 			return -EINVAL;
+		break;
+	default:
+		return -EINVAL;
+	}
+}
+
+static int mlx5_uar_info(struct mlx5_context *ctx,
+		struct mlx5dv_ctx_uar_attr * uar_attr)
+{
+	int gross_uuars;
+	int i;
+
+	if (!uar_attr)
+		return -EINVAL;
+
+	gross_uuars = get_total_uuars() / MLX5_NUM_UUARS_PER_PAGE * 4;
+	for (i = 0; i < gross_uuars; ++i) {
+		if (ctx->bfs[i].reg == uar_attr->addr)
+			break;
+	}
+	if (i == gross_uuars)
+		return -EINVAL;
+
+	uar_attr->uar_base_addr = ctx->uar[i / 4].regs;
+	uar_attr->uar_offset = ctx->uar[i / 4].offset;
+
+	return 0;
+}
+
+int mlx5dv_context_attr_get(struct ibv_context *ibv_ctx,
+			enum mlx5dv_ctx_attr_type type, void *attr)
+{
+	struct mlx5_context *ctx = to_mctx(ibv_ctx);
+
+	switch (type) {
+	case MLX5DV_CTX_ATTR_UAR_INFO:
+		return mlx5_uar_info(ctx,
+				(struct mlx5dv_ctx_uar_attr *) ((uintptr_t) attr));
 		break;
 	default:
 		return -EINVAL;

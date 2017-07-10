@@ -33,18 +33,33 @@
 #ifndef _MLX5DV_H_
 #define _MLX5DV_H_
 
-#include <linux/types.h> /* For the __be64 type */
+#include <stddef.h>
+#include <stdio.h>
+
+/* Verbs header. */
+/* ISO C doesn't support unnamed structs/unions, disabling -pedantic. */
+#ifdef PEDANTIC
+#pragma GCC diagnostic ignored "-Wpedantic"
+#endif
 #include <infiniband/verbs.h>
-
-
+#ifdef PEDANTIC
+#pragma GCC diagnostic error "-Wpedantic"
+#endif
 
 enum mlx5dv_ctx_attr_type {
-	MLX5DV_CTX_ATTR_BUF_ALLOCATORS	= 1,
+	MLX5DV_CTX_ATTR_BUF_ALLOCATORS = 1,
+	MLX5DV_CTX_ATTR_UAR_INFO,
 };
 
 struct mlx5dv_ctx_attr_allocators {
 	void *(*alloc_buf)(size_t size, int alignment);
 	void (*free_buf)(void *ptr);
+};
+
+struct mlx5dv_ctx_uar_attr {
+	void *addr; /* IN: address of db or uar base */
+	void *uar_base_addr; /* OUT: uar page aligned address used in mmap */
+	off_t uar_offset; /* OUT: offset used in mmap to request UAR mapping */
 };
 
 /*
@@ -53,6 +68,14 @@ struct mlx5dv_ctx_attr_allocators {
  * Return: 0 in case of success.
  */
 int mlx5dv_context_attr_set(struct ibv_context *context,
-			enum mlx5dv_ctx_attr_type type, void *attr);
+		enum mlx5dv_ctx_attr_type type, void *attr);
+
+/*
+ * Generic context attributes get API
+ *
+ * Return: 0 in case of success.
+ */
+int mlx5dv_context_attr_get(struct ibv_context *context,
+		enum mlx5dv_ctx_attr_type type, void *attr);
 
 #endif /* _MLX5DV_H_ */

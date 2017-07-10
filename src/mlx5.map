@@ -2,5 +2,6 @@
 	global:
 		openib_driver_init;
 		mlx5dv_context_attr_set;
+		mlx5dv_context_attr_get;
 	local: *;
 };

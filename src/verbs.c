@@ -3582,7 +3582,8 @@ static struct mlx5_send_db_data *allocate_send_db(struct mlx5_context *ctx)
 			goto out;
 		}
 		db_idx = ctx->num_wc_uars;
-		wc_uar->uar = mlx5_uar_mmap(db_idx, MLX5_EXP_IB_MMAP_N_ALLOC_WC_CMD, dev->page_size, ctx->ibv_ctx.cmd_fd);
+		wc_uar->uar = mlx5_uar_mmap(db_idx, MLX5_EXP_IB_MMAP_N_ALLOC_WC_CMD,
+					dev->page_size, ctx->ibv_ctx.cmd_fd, NULL);
 		if (wc_uar->uar == MAP_FAILED) {
 			errno = ENOMEM;
 			goto out;

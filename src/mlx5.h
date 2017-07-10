@@ -369,6 +369,7 @@ enum mlx5_uar_mapping_type {
 struct mlx5_uar_data {
 	enum mlx5_uar_mapping_type	map_type;
 	void				*regs;
+	off_t				offset;
 };
 
 struct mlx5_port_info_ctx {
@@ -1081,7 +1082,7 @@ static inline enum mlx5_lock_type mlx5_get_locktype(void)
 	return MLX5_MUTEX;
 }
 
-void *mlx5_uar_mmap(int idx, int cmd, int page_size, int cmd_fd);
+void *mlx5_uar_mmap(int idx, int cmd, int page_size, int cmd_fd, off_t *o_offset);
 int mlx5_cpu_local_numa(void);
 void mlx5_build_ctrl_seg_data(struct mlx5_qp *qp, uint32_t qp_num);
 int mlx5_alloc_buf(struct mlx5_buf *buf, size_t size, int page_size);
