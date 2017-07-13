@@ -369,6 +369,7 @@ enum mlx5_uar_mapping_type {
 struct mlx5_uar_data {
 	enum mlx5_uar_mapping_type	map_type;
 	void				*regs;
+	off_t				offset;
 };
 
 struct mlx5_port_info_ctx {
@@ -466,6 +467,9 @@ struct mlx5_context {
 	void			       *hca_core_clock;
 	uint32_t			max_tso;
 	int				cmds_supp_uhw;
+
+	void *(*extern_alloc_buf)(size_t size, int alignment);
+	void (*extern_free_buf)(void *ptr);
 };
 
 struct mlx5_bitmap {
@@ -1078,7 +1082,7 @@ static inline enum mlx5_lock_type mlx5_get_locktype(void)
 	return MLX5_MUTEX;
 }
 
-void *mlx5_uar_mmap(int idx, int cmd, int page_size, int cmd_fd);
+void *mlx5_uar_mmap(int idx, int cmd, int page_size, int cmd_fd, off_t *o_offset);
 int mlx5_cpu_local_numa(void);
 void mlx5_build_ctrl_seg_data(struct mlx5_qp *qp, uint32_t qp_num);
 int mlx5_alloc_buf(struct mlx5_buf *buf, size_t size, int page_size);
@@ -1283,10 +1287,9 @@ int mlx5_exp_peer_peek_cq(struct ibv_cq *cq,
 int mlx5_exp_peer_abort_peek_cq(struct ibv_cq *ibcq,
 				struct ibv_exp_peer_abort_peek *ack_ctx);
 
-int
-mlx5_alloc_buf_ext(struct mlx5_context *ctx, struct mlx5_buf *buf, size_t size);
-void
-mlx5_free_buf_ext(struct mlx5_context *ctx, struct mlx5_buf *buf);
+int mlx5_alloc_buf_extern(struct mlx5_context *ctx, struct mlx5_buf *buf,
+				size_t size, int alignment);
+void mlx5_free_buf_extern(struct mlx5_context *ctx, struct mlx5_buf *buf);
 
 static inline void *mlx5_find_uidx(struct mlx5_context *ctx, uint32_t uidx)
 {

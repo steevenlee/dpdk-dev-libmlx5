@@ -348,46 +348,43 @@ static void free_huge_buf(struct mlx5_context *ctx, struct mlx5_buf *buf)
 		mlx5_spin_unlock(&ctx->hugetlb_lock);
 }
 
-void
-mlx5_free_buf_ext(struct mlx5_context *ctx, struct mlx5_buf *buf)
+void mlx5_free_buf_extern(struct mlx5_context *ctx, struct mlx5_buf *buf)
 {
-	char *val;
-
-	val = getenv("MLX5_FREE_EXTERNAL");
-	if (val != NULL) {
-		void (*func)(void *);
-
-		sscanf(val, "%p", &func);
-		(*func)(buf->buf);
+	if (ctx->extern_free_buf!= NULL) {
+		ibv_dofork_range(buf->buf, buf->length);
+		ctx->extern_free_buf(buf->buf);
 		buf->buf = NULL;
 		buf->length = 0;
 		return;
-	}
-	mlx5_dbg(stderr, MLX5_DBG_CONTIG,
-		 "External mode free failed");
+	} else
+		mlx5_dbg(stderr, MLX5_DBG_CONTIG,
+			 "External allocator not set");
 }
 
-int
-mlx5_alloc_buf_ext(struct mlx5_context *ctx, struct mlx5_buf *buf, size_t size)
+int mlx5_alloc_buf_extern(struct mlx5_context *ctx, struct mlx5_buf *buf,
+		size_t size, int alignment)
 {
-	char *val;
+	void *addr;
 
-	val = getenv("MLX5_ALLOC_EXTERNAL");
-	if (val != NULL) {
-		void *(*func)(int);
-		void *addr;
-
-		sscanf(val, "%p", &func);
-		addr = (*func)(size);
+	if (ctx->extern_alloc_buf != NULL) {
+		addr = ctx->extern_alloc_buf(size, alignment);
 		if (addr) {
+			if (ibv_dontfork_range(addr, size)) {
+				mlx5_dbg(stderr, MLX5_DBG_CONTIG,
+					 "External mode dontfork_range failed");
+				ctx->extern_free_buf(addr);
+				return -1;
+			}
 			buf->buf = addr;
 			buf->length = size;
 			buf->type = MLX5_ALLOC_TYPE_EXTERNAL;
 			return 0;
-		}
-	}
-	mlx5_dbg(stderr, MLX5_DBG_CONTIG,
-		 "External mode allocation failed");
+		} else
+			mlx5_dbg(stderr, MLX5_DBG_CONTIG,
+				 "External mode allocation failed");
+	} else
+		mlx5_dbg(stderr, MLX5_DBG_CONTIG,
+			 "External allocator not set");
 	return 0;
 }
 
@@ -452,7 +449,7 @@ static int alloc_preferred_buf(struct mlx5_context *mctx,
 	}
 
 	if (type == MLX5_ALLOC_TYPE_EXTERNAL)
-		return mlx5_alloc_buf_ext(mctx, buf, size);
+		return mlx5_alloc_buf_extern(mctx, buf, size, page_size);
 
 	return mlx5_alloc_buf(buf, size, page_size);
 }
@@ -463,7 +460,10 @@ int mlx5_alloc_preferred_buf(struct mlx5_context *mctx,
 			     enum mlx5_alloc_type type,
 			     const char *component)
 {
-	int ret = alloc_preferred_buf(mctx, buf, size, page_size,
+	size_t al_size;
+
+	al_size = align(size, page_size);
+	int ret = alloc_preferred_buf(mctx, buf, al_size, page_size,
 				      type, component);
 	if (ret)
 		return ret;
@@ -472,7 +472,7 @@ int mlx5_alloc_preferred_buf(struct mlx5_context *mctx,
 	    buf->peer.ctx->register_va &&
 	    (buf->peer.dir & IBV_EXP_PEER_DIRECTION_FROM_PEER ||
 	     buf->peer.dir & IBV_EXP_PEER_DIRECTION_TO_PEER)) {
-		buf->peer.va_id = buf->peer.ctx->register_va(buf->buf, size,
+		buf->peer.va_id = buf->peer.ctx->register_va(buf->buf, al_size,
 				  buf->peer.ctx->peer_id, buf->peer.pb);
 		if (!buf->peer.va_id) {
 			mlx5_free_actual_buf(mctx, buf);
@@ -511,8 +511,9 @@ int mlx5_free_actual_buf(struct mlx5_context *ctx, struct mlx5_buf *buf)
 		break;
 	
 	case MLX5_ALLOC_TYPE_EXTERNAL:
-		mlx5_free_buf_ext(ctx, buf);
+		mlx5_free_buf_extern(ctx, buf);
 		break;
+
 	default:
 		fprintf(stderr, "Bad allocation type\n");
 	}
@@ -553,14 +554,15 @@ void mlx5_get_alloc_type(struct ibv_context *context,
 {
 	char env_value[VERBS_MAX_ENV_VAL];
 	char name[128];
-	char *env;
 
 	snprintf(name, sizeof(name), "%s_ALLOC_TYPE", component);
 
 	*alloc_type = default_type;
 
 	if (!ibv_exp_cmd_getenv(context, name, env_value, sizeof(env_value))) {
-		if (!strcasecmp(env_value, "ANON"))
+		if (!strcasecmp(env_value, "EXTERNAL"))
+			*alloc_type = MLX5_ALLOC_TYPE_EXTERNAL;
+		else if (!strcasecmp(env_value, "ANON"))
 			*alloc_type = MLX5_ALLOC_TYPE_ANON;
 		else if (!strcasecmp(env_value, "HUGE"))
 			*alloc_type = MLX5_ALLOC_TYPE_HUGE;
@@ -573,10 +575,6 @@ void mlx5_get_alloc_type(struct ibv_context *context,
 		else if (!strcasecmp(env_value, "ALL"))
 			*alloc_type = MLX5_ALLOC_TYPE_ALL;
 	}
-
-	env = getenv(name);
-	if (env && !strcasecmp(env, "EXTERNAL"))
-	       	*alloc_type = MLX5_ALLOC_TYPE_EXTERNAL; 
 }
 
 static void mlx5_alloc_get_env_info(struct ibv_context *context,
