@@ -361,8 +361,7 @@ void mlx5_free_buf_extern(struct mlx5_context *ctx, struct mlx5_buf *buf)
 			 "External allocator not set");
 }
 
-int
-mlx5_alloc_buf_extern(struct mlx5_context *ctx, struct mlx5_buf *buf,
+int mlx5_alloc_buf_extern(struct mlx5_context *ctx, struct mlx5_buf *buf,
 		size_t size, int alignment)
 {
 	void *addr;
@@ -461,7 +460,10 @@ int mlx5_alloc_preferred_buf(struct mlx5_context *mctx,
 			     enum mlx5_alloc_type type,
 			     const char *component)
 {
-	int ret = alloc_preferred_buf(mctx, buf, size, page_size,
+	size_t al_size;
+
+	al_size = align(size, page_size);
+	int ret = alloc_preferred_buf(mctx, buf, al_size, page_size,
 				      type, component);
 	if (ret)
 		return ret;
@@ -470,7 +472,7 @@ int mlx5_alloc_preferred_buf(struct mlx5_context *mctx,
 	    buf->peer.ctx->register_va &&
 	    (buf->peer.dir & IBV_EXP_PEER_DIRECTION_FROM_PEER ||
 	     buf->peer.dir & IBV_EXP_PEER_DIRECTION_TO_PEER)) {
-		buf->peer.va_id = buf->peer.ctx->register_va(buf->buf, size,
+		buf->peer.va_id = buf->peer.ctx->register_va(buf->buf, al_size,
 				  buf->peer.ctx->peer_id, buf->peer.pb);
 		if (!buf->peer.va_id) {
 			mlx5_free_actual_buf(mctx, buf);
